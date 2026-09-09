@@ -803,7 +803,7 @@ show_result() {
     echo -e "     cat /opt/pgsql${pg_major}/meta/password.txt"
     echo -e ""
     echo -e "  4. 验证 (使用密码):"
-    echo -e "     psql -p ${PG_PORT} -U postgres -W -c '\dx'"
+    echo -e "     /opt/pgsql${pg_major}/bin/psql -p ${PG_PORT} -U postgres -W -c '\dx'"
     echo -e ""
     echo -e "  5. 停止数据库:"
     echo -e "     /opt/pgsql${pg_major}/bin/pg_ctl -D /opt/pgsql${pg_major}/data stop"
