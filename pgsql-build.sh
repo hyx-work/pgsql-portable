@@ -1,0 +1,357 @@
+#!/bin/bash
+
+if [ "$1" == "" -o "$2" == "" ]; then
+    echo "usage: $0 <triple>|host version"
+    exit 1
+fi
+
+triple=$1
+version=$2
+numcpus=$(nproc --all)
+host="--host=$triple"
+
+case $triple in
+    x86_64-*linux*)
+        arch=x86_64
+        ;;
+    aarch64-*linux*)
+        arch=aarch64
+        ;;
+    s390x-*linux*)
+        arch=s390x
+        ;;
+    arm-*linux*)
+        arch=armv7l
+        ;;
+    host)
+        arch=$(uname -m)
+        host=""
+        ;;
+    *)
+        echo "unsupported target"
+        exit 1
+        ;;
+esac
+
+basedir=$(dirname $(readlink -f $0))
+
+openssl_version="3.5.7"
+openssl_tar="openssl-$openssl_version.tar.gz"
+libedit_tar="libedit-20260512-3.1.tar.gz"
+postgresql_tar="postgresql-$version.tar.bz2"
+ncurses_tar="ncurses.tar.gz"
+zlib_version="1.3.2"
+zlib_tar="zlib-$zlib_version.tar.gz"
+icu_version="74-2"
+icu_tar="icu4c-74_2-src.tgz"
+
+# dependencies
+deps="$basedir/deps/$triple"
+mkdir -p "$deps"
+
+# postgres dist
+dist="$basedir/dist/$triple/$version"
+mkdir -p "$dist"
+
+# build
+build="$basedir/build/$triple/$version"
+mkdir -p "$build"
+
+# cache for tarballs
+cache="$basedir/cache"
+mkdir -p "$cache"
+
+log_with_time() {
+    echo "[$(date +%H:%M:%S.%03N)] $1"
+}
+
+# $1=archive, $2=url
+download() {
+    if [ -f "$cache/$1" ]; then
+        log_with_time "Found $1 in the cache"
+    else
+        log_with_time "Downloading $1"
+        # 【新增：把拼错或拼对的完整连接直接打印出来】
+        log_with_time "Target URL: $2"
+        if ! curl -L -o "$cache/$1" "$2"; then
+            log_with_time "Unable to download $1!"
+            exit 1
+        fi
+    fi
+}
+
+download_postgresql() {
+    download "$postgresql_tar" "https://ftp.postgresql.org/pub/source/v$version/$postgresql_tar"
+}
+
+download_openssl() {
+    download "$openssl_tar" "https://github.com/openssl/openssl/releases/download/openssl-$openssl_version/$openssl_tar"
+}
+
+download_libedit() {
+    download "$libedit_tar" "https://thrysoee.dk/editline/$libedit_tar"
+}
+
+download_ncurses() {
+    download "$ncurses_tar" "https://invisible-island.net/archives/ncurses//$ncurses_tar"
+}
+
+download_zlib() {
+    download "$zlib_tar" "https://zlib.net/fossils/$zlib_tar"
+}
+
+download_icu() {
+    download "$icu_tar" "https://github.com/unicode-org/icu/releases/download/release-$icu_version/$icu_tar"
+}
+
+build_zlib() {
+    log="$build/zlib.log"
+    rm -f "$log"
+    cd "$build"
+    rm -rf zlib
+    mkdir -p zlib
+    tar xf "$cache/$zlib_tar" -C zlib --strip-components 1
+    cd zlib
+
+    log_with_time "Configuring zlib"
+    if [ "$triple" != "host" ]; then
+        export CHOST="$triple"
+    fi
+    ./configure --prefix=/usr --static >>"$log" 2>>"$log"
+    
+    log_with_time "Building zlib"
+    if ! make -j$numcpus >>"$log" 2>>"$log"; then
+        log_with_time "Build failed!"
+        exit 1
+    fi
+    log_with_time "Installing zlib"
+    if ! make DESTDIR="$deps" install >>"$log" 2>>"$log"; then
+        log_with_time "Install failed!"
+        exit 1
+    fi
+    unset CHOST
+}
+
+build_openssl() {
+    log="$build/openssl.log"
+    rm -f "$log"
+    cd "$build"
+    rm -rf openssl
+    mkdir -p openssl
+    tar xf "$cache/$openssl_tar" -C openssl --strip-components 1
+    cd openssl
+    if [ "$triple" == "host" ]; then
+        cross=""
+    elif [ -z "$CC" ]; then
+        cross=--cross-compile-prefix="$triple-"
+    else
+        cross=--cross-compile-prefix=
+    fi
+    case $arch in
+        s390x)
+            target=linux64-$arch
+            ;;
+        *)
+            target=linux-$arch
+            ;;
+    esac
+    log_with_time "Configuring openssl"
+    ./Configure --prefix=/usr "$cross" --libdir=lib no-shared no-threads $target --with-zlib-lib="$deps/usr/lib" --with-zlib-include="$deps/usr/include" >>"$log" 2>>"$log"
+    log_with_time "Building openssl"
+    if ! make -j$numcpus >>"$log" 2>>"$log"; then
+        log_with_time "Build failed!"
+        exit 1
+    fi
+    log_with_time "Installing openssl"
+    if ! make DESTDIR="$deps" install_sw >>"$log" 2>>"$log"; then
+        log_with_time "Install failed!"
+        exit 1
+    fi
+}
+
+build_icu() {
+    log="$build/icu.log"
+    rm -f "$log"
+    cd "$build"
+    rm -rf icu
+    mkdir -p icu
+    tar xf "$cache/$icu_tar" -C icu --strip-components 1
+    cd icu/source
+
+    log_with_time "Configuring icu"
+    ./configure --prefix=/usr "$host" --enable-static --disable-shared --with-data-packaging=static >>"$log" 2>>"$log"
+    if [ "$?" != "0" ]; then
+        log_with_time "Configure failed!"
+        exit 1
+    fi
+
+    log_with_time "Building icu"
+    if ! make -j$numcpus >>"$log" 2>>"$log"; then
+        log_with_time "Build failed!"
+        exit 1
+    fi
+
+    log_with_time "Installing icu"
+    if ! make DESTDIR="$deps" install >>"$log" 2>>"$log"; then
+        log_with_time "Install failed!"
+        exit 1
+    fi
+}
+
+build_ncurses() {
+    log="$build/ncurses.log"
+    rm -f "$log"
+    cd "$build"
+    rm -rf ncurses
+    mkdir -p ncurses
+    tar xf "$cache/$ncurses_tar" -C ncurses --strip-components 1
+    cd ncurses
+
+    log_with_time "Configuring ncurses"
+    if ! ./configure --without-tests --with-install-prefix="$deps" --libdir=/usr/lib --prefix=/usr "$host" --disable-widec --disable-shared --disable-stripping --with-terminfo-dirs=/etc/terminfo:/lib/terminfo:/usr/share/terminfo >>$log 2>>$log; then
+        log_with_time "Configure failed!"
+        exit 1
+    fi
+
+    log_with_time "Building ncurses"
+    if ! make -j$numcpus >>$log 2>>$log; then
+        log_with_time "Build failed!"
+        exit 1
+    fi
+
+    log_with_time "Installing ncurses"
+    if ! make install >>"$log" 2>>"$log"; then
+        log_with_time "Install failed!"
+        exit 1
+    fi
+}
+
+build_libedit() {
+    log="$build/libedit.log"
+    rm -f "$log"
+    cd "$build"
+    rm -rf libedit
+    mkdir -p libedit
+    tar xf "$cache/$libedit_tar" -C libedit --strip-components 1
+    cd libedit
+
+    log_with_time "Configuring libedit"
+    LDFLAGS="-L$deps/usr/lib" CFLAGS="-I$deps/usr/include" ./configure  --libdir=/usr/lib --prefix=/usr "$host" --disable-shared >>"$log" 2>>"$log"
+    if [ "$?" != "0" ]; then
+        log_with_time "Configure failed!"
+        exit 1
+    fi
+
+    log_with_time "Building libedit"
+    if ! make -j$numcpus >>$log 2>>$log; then
+        log_with_time "Build failed!"
+        exit 1
+    fi
+
+    log_with_time "Installing libedit"
+    if ! make DESTDIR="$deps" install >>"$log" 2>>"$log"; then
+        log_with_time "Install failed!"
+        exit 1
+    fi
+}
+
+check_build_deps() {
+    log_with_time "Checking and building dependencies"
+
+    if [ -f "$deps/usr/lib/libz.a" ]; then
+        log_with_time "Using existing zlib"
+    else
+        download_zlib
+        build_zlib
+    fi
+
+    if [ -f "$deps/usr/lib/libcrypto.a" ]; then
+        log_with_time "Using existing openssl"
+    else
+        download_openssl
+        build_openssl
+    fi
+
+    if [ -f "$deps/usr/lib/libicuuc.a" ]; then
+        log_with_time "Using existing icu"
+    else
+        download_icu
+        build_icu
+    fi
+
+    if [ -f "$deps/usr/lib/libcurses.a" ]; then
+        log_with_time "Using existing ncurses"
+    else
+        download_ncurses
+        build_ncurses
+    fi
+
+    if [ -f "$deps/usr/lib/libedit.a" ]; then
+        log_with_time "Using existing libedit"
+    else
+        download_libedit
+        build_libedit
+    fi
+}
+
+build_postgresql() {
+    log="$build/postgresql.log"
+    rm -f "$log"
+    cd "$build"
+    rm -rf postgresql
+    mkdir -p postgresql
+    tar xf "$cache/$postgresql_tar" -C postgresql --strip-components 1
+    cd postgresql
+
+
+    # 关键：ICU 库在 -lstdc++ 之前
+    export LDFLAGS="-L$deps/usr/lib -Wl,-rpath=\\$\$ORIGIN/../lib -licui18n -licuuc -licudata -lstdc++ -lpthread"
+    export LDFLAGS_EX="$LDFLAGS"
+    export CFLAGS="-I$deps/usr/include"
+    export LIBS="-licui18n -licuuc -licudata -lstdc++ -lpthread"
+
+    log_with_time "Configuring postgresql $version"
+    if ! ./configure "$host" \
+        --libdir=/usr/lib \
+        --prefix=/usr \
+        --with-openssl \
+        --with-zlib \
+        --with-icu \
+        --without-readline \
+        LIBS="-licui18n -licuuc -licudata -lstdc++ -lpthread" \
+        LDFLAGS="-L$deps/usr/lib -Wl,-rpath=\\$\$ORIGIN/../lib -licui18n -licuuc -licudata -lstdc++ -lpthread" \
+        >>"$log" 2>>"$log"; then
+        log_with_time "Configure failed!"
+        exit 1
+    fi
+
+    log_with_time "Building postgresql $version"
+    if ! make -j$numcpus >>$log 2>>$log; then
+        log_with_time "Build failed!"
+        exit 1
+    fi
+
+    log_with_time "Installing postgresql $version"
+    rm -rf "$dist"
+    if ! make DESTDIR="$dist" install >>"$log" 2>>"$log"; then
+        log_with_time "Install failed!"
+        exit 1
+    fi
+}
+
+package_postgresql() {
+    log_with_time "Packaging postgresql $version"
+    cd "$dist"
+    mv usr pgsql
+    #rm -rf pgsql/include
+    strip pgsql/bin/*
+    find pgsql -name \*.so\* -exec strip {} \;
+    find pgsql -name \*.a -exec rm -f {} \;
+    tar c pgsql | xz -z -9 >pgsql-$version-linux-$arch.tar.xz
+}
+
+check_build_deps
+download_postgresql
+build_postgresql
+package_postgresql
+

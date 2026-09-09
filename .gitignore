@@ -1,0 +1,75 @@
+# Build artifacts (keep directories, ignore contents)
+build/*
+!build/.gitkeep
+deps/*
+!deps/.gitkeep
+dist/*
+!dist/.gitkeep
+cache/*
+!cache/.gitkeep
+
+# Output files
+output/*
+!output/.gitkeep
+
+# Deployment reports
+pgsql-full-deploy-*.txt
+pgsql-deploy-*.txt
+
+# Logs
+*.log
+
+# Temporary files
+/tmp/
+*.tmp
+*.swp
+*.swo
+*~
+
+# Editor directories
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Compiled binaries
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+
+# Package files
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tgz
+*.rpm
+*.deb
+*.msi
+*.exe
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+pg_data/
+data/
+
+# PostgreSQL specific
+postgresql.conf
+pg_hba.conf
+pg_ident.conf
+postmaster.pid
+postmaster.opts
