@@ -26,6 +26,8 @@ pgvector 是 PostgreSQL 的向量相似度搜索扩展，支持 IVFFlat 和 HNSW
 | GCC | C 编译器 |
 | make | 构建工具 |
 | OpenMP | 可选，用于并行索引构建 |
+| patchelf | 修复 RPATH（可选，未安装时跳过） |
+| plugin.common.sh | 公共库（自动 source，无需手动引入） |
 
 ---
 
@@ -79,6 +81,12 @@ pgsql-portable/
 # 指定版本
 ./plugin.vector.sh build host 16.15 0.8.6
 
+# 指定并行编译数
+./plugin.vector.sh build host 16.15 --jobs 8
+
+# 依赖分析只报告不失败（非严格模式）
+./plugin.vector.sh build host 16.15 --no-strict
+
 # 交叉编译 ARM64
 ./plugin.vector.sh build aarch64-linux-gnu 16.15
 ```
@@ -87,47 +95,34 @@ pgsql-portable/
 
 ## 编译流程
 
+脚本自动执行以下步骤，所有命令通过 `run_or_die` 包裹，失败时自动打印日志并终止。
+
 ### 1. 下载源码
 
-```bash
-# 下载地址
-https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.6.tar.gz
-
-# 缓存位置
-cache/vector-0.8.6.tar.gz
+```
+下载地址: https://github.com/pgvector/pgvector/archive/refs/tags/v{version}.tar.gz
+缓存位置: cache/vector-{version}.tar.gz
 ```
 
 ### 2. 编译
 
 ```bash
-PG_CONFIG_BIN="dist/host/16.15/pgsql/bin/pg_config"
-PGXS_FILE=$(find dist/host/16.15/pgsql -name "pgxs.mk" | head -1)
-
+# 脚本内部执行 (resolve_pg_env → run_or_die)
 make USE_PGXS=1 \
     PG_CONFIG="$PG_CONFIG_BIN" \
     PGXS="$PGXS_FILE" \
-    PG_CPPFLAGS="-I$PG_INCLUDE -I$PG_SERVER_INCLUDE" \
-    -j$(nproc)
+    PG_CPPFLAGS="-I$PG_INCLUDE -I$PG_SERVER_INCLUDE -I$DEPS_DIR/usr/include" \
+    -j"$jobs"
 ```
 
 ### 3. 打包
 
-```bash
-tmp_dest="build/host/16.15/vector_v0.8.6/tmp_install"
-mkdir -p "$tmp_dest"
-
-make USE_PGXS=1 \
-    PG_CONFIG="$PG_CONFIG_BIN" \
-    PGXS="$PGXS_FILE" \
-    bindir="$tmp_dest/bin" \
-    pkglibdir="$tmp_dest/lib/postgresql" \
-    datadir="$tmp_dest/share/postgresql" \
-    sharedir="$tmp_dest/share/postgresql" \
-    includedir_server="$tmp_dest/postgresql/include/server" \
-    install
-
-cd "$tmp_dest"
-tar -czf dist/host/16.15/plugins/vector-v0.8.6-pg16.x86_64.tar.gz lib share
+```
+安装: make install (PGXS 标准布局到 tmp_install/)
+瘦身: strip --strip-unneeded (仅 .so 文件)
+RPATH修复: fix_rpath (patchelf 设置 $ORIGIN/..)
+分析: analyze_dir 依赖检查 (ldd + RPATH)
+打包: tar -czf → dist/host/16.15/plugins/vector-v0.8.6-pg16.x86_64.tar.gz
 ```
 
 ---
@@ -139,9 +134,10 @@ tar -czf dist/host/16.15/plugins/vector-v0.8.6-pg16.x86_64.tar.gz lib share
 | 参数 | 值 | 说明 |
 |------|-----|------|
 | `USE_PGXS` | `1` | 使用 PostgreSQL 扩展构建系统 |
-| `PG_CONFIG` | `$dist/bin/pg_config` | PostgreSQL 配置工具 |
-| `PGXS` | `$dist/share/postgresql/extension/pgxs.mk` | PGXS 构建文件 |
-| `PG_CPPFLAGS` | `-I...` | 头文件搜索路径 |
+| `PG_CONFIG` | `$DIST_DIR/bin/pg_config` | PostgreSQL 配置工具 |
+| `PGXS` | `$DIST_DIR/.../pgxs.mk` | PGXS 构建文件 |
+| `PG_CPPFLAGS` | `-I$PG_INCLUDE -I$PG_SERVER_INCLUDE` | 头文件搜索路径 |
+| `-j` | `$jobs` (自动检测 CPU 核心数) | 并行编译数 |
 
 ### 打包参数
 
@@ -151,6 +147,7 @@ tar -czf dist/host/16.15/plugins/vector-v0.8.6-pg16.x86_64.tar.gz lib share
 | `pkglibdir` | `$tmp_dest/lib/postgresql` | 库文件目录 |
 | `datadir` | `$tmp_dest/share/postgresql` | 数据文件目录 |
 | `sharedir` | `$tmp_dest/share/postgresql` | 共享文件目录 |
+| `includedir_server` | `$tmp_dest/include/postgresql/server` | 服务器头文件目录 |
 
 ---
 
@@ -541,7 +538,8 @@ SET hnsw.ef_search = 100;
 ### 查看编译日志
 
 ```bash
-cat build/host/16.15/vector_v0.8.6/vector.log
+# 编译日志 (run_or_die 失败时会自动打印最后 30 行)
+cat build/host/16.15/vector.log
 ```
 
 ### 验证安装
@@ -558,10 +556,10 @@ SELECT '[1,2,3]'::vector <=> '[4,5,6]'::vector;
 
 ```bash
 # 复制插件到 PostgreSQL
-cp build/host/16.15/vector_v0.8.6/tmp_install/lib/postgresql/vector.so \
+cp build/host/16.15/tmp_install/lib/postgresql/vector.so \
    dist/host/16.15/pgsql/lib/postgresql/
 
-cp build/host/16.15/vector_v0.8.6/tmp_install/share/postgresql/extension/* \
+cp build/host/16.15/tmp_install/share/postgresql/extension/* \
    dist/host/16.15/pgsql/share/postgresql/extension/
 
 # 创建扩展

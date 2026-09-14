@@ -26,6 +26,8 @@ pg_repack 是 PostgreSQL 的在线表重组工具，可以在不锁表的情况�
 | PostgreSQL 源码 | 提供 libpgcommon.a、libpgport.a |
 | GCC | C 编译器 |
 | make | 构建工具 |
+| patchelf | 修复 RPATH（可选，未安装时跳过） |
+| plugin.common.sh | 公共库（自动 source，无需手动引入） |
 
 ---
 
@@ -80,6 +82,12 @@ pgsql-portable/
 # 指定版本
 ./plugin.pg_repack.sh build host 16.15 1.5.3
 
+# 指定并行编译数
+./plugin.pg_repack.sh build host 16.15 --jobs 8
+
+# 依赖分析只报告不失败（非严格模式）
+./plugin.pg_repack.sh build host 16.15 --no-strict
+
 # 交叉编译 ARM64
 ./plugin.pg_repack.sh build aarch64-linux-gnu 16.15
 ```
@@ -88,59 +96,49 @@ pgsql-portable/
 
 ## 编译流程
 
+脚本自动执行以下步骤，所有命令通过 `run_or_die` 包裹，失败时自动打印日志并终止。
+
 ### 1. 下载源码
 
-```bash
-# 下载地址（注意 ver_ 前缀）
-https://github.com/reorg/pg_repack/archive/refs/tags/ver_1.5.3.tar.gz
-
-# 缓存位置
-cache/pg_repack-1.5.3.tar.gz
+```
+下载地址: https://github.com/reorg/pg_repack/archive/refs/tags/ver_{version}.tar.gz
+缓存位置: cache/pg_repack-{version}.tar.gz
+注意: tag 格式是 ver_1.5.3 (带 ver_ 前缀)
 ```
 
 ### 2. 编译客户端（bin/）
 
 ```bash
-PG_CONFIG_BIN="dist/host/16.15/pgsql/bin/pg_config"
-PGXS_FILE=$(find dist/host/16.15/pgsql -name "pgxs.mk" | head -1)
-PG_SRC="build/host/16.15/postgresql"
-
+# 脚本内部执行 (resolve_pg_env → require_pg_source → run_or_die)
+# 依赖: libpgcommon.a, libpgport.a, libpq
+# RPATH: $ORIGIN/../lib (便携包 lib/ 下的 libpq)
 make -C bin USE_PGXS=1 \
     PG_CONFIG="$PG_CONFIG_BIN" \
     PGXS="$PGXS_FILE" \
-    PG_CPPFLAGS="-I$PG_INCLUDE -I$PG_INTERNAL_INCLUDE -I$PG_SERVER_INCLUDE" \
-    LDFLAGS="-L$PG_SRC/src/common -L$PG_SRC/src/port -L$dist/lib -Wl,-rpath=\$\$ORIGIN/../lib" \
-    -j$(nproc)
+    PG_CPPFLAGS="$PG_CPPFLAGS" \
+    LDFLAGS="-L$pg_src/src/common -L$pg_src/src/port -L$DIST_DIR/lib -Wl,-rpath=\$\$ORIGIN/../lib" \
+    -j"$jobs"
 ```
 
 ### 3. 编译扩展（lib/）
 
 ```bash
+# 脚本内部执行 (run_or_die)
 make -C lib USE_PGXS=1 \
     PG_CONFIG="$PG_CONFIG_BIN" \
     PGXS="$PGXS_FILE" \
-    PG_CPPFLAGS="-I$PG_INCLUDE -I$PG_INTERNAL_INCLUDE -I$PG_SERVER_INCLUDE" \
-    -j$(nproc)
+    PG_CPPFLAGS="$PG_CPPFLAGS" \
+    -j"$jobs"
 ```
 
 ### 4. 打包
 
-```bash
-tmp_dest="build/host/16.15/pg_repack_v1.5.3/tmp_install"
-mkdir -p "$tmp_dest"
-
-make USE_PGXS=1 \
-    PG_CONFIG="$PG_CONFIG_BIN" \
-    PGXS="$PGXS_FILE" \
-    bindir="$tmp_dest/bin" \
-    pkglibdir="$tmp_dest/lib/postgresql" \
-    datadir="$tmp_dest/share/postgresql" \
-    sharedir="$tmp_dest/share/postgresql" \
-    includedir_server="$tmp_dest/postgresql/include/server" \
-    install
-
-cd "$tmp_dest"
-tar -czf dist/host/16.15/plugins/pg_repack-v1.5.3-pg16.x86_64.tar.gz lib share bin
+```
+安装: make install (PGXS 标准布局到 tmp_install/)
+瘦身: strip --strip-unneeded (.so) + strip --strip-all (bin)
+RPATH: fix_rpath 修复 bin/ 和 lib/ 的 RPATH
+分析: analyze_dir 依赖检查 (ldd + RPATH)
+打包: tar -czf → dist/host/16.15/plugins/pg_repack-v1.5.3-pg16.x86_64.tar.gz
 ```
 
 ---
@@ -153,7 +151,8 @@ tar -czf dist/host/16.15/plugins/pg_repack-v1.5.3-pg16.x86_64.tar.gz lib share b
 |------|-----|------|
 | `-C bin` | - | 只编译 bin 目录 |
 | `USE_PGXS` | `1` | 使用 PGXS |
-| `LDFLAGS` | `-Wl,-rpath=\$\$ORIGIN/../lib` | 设置 RPATH |
+| `PG_CPPFLAGS` | `-I$PG_INCLUDE -I$PG_INTERNAL_INCLUDE -I$PG_SERVER_INCLUDE` | 头文件路径 |
+| `LDFLAGS` | `-L$pg_src/src/common -L$pg_src/src/port -L$DIST_DIR/lib -Wl,-rpath=\$\$ORIGIN/../lib` | 链接 + RPATH |
 
 ### 扩展编译参数
 
@@ -161,6 +160,7 @@ tar -czf dist/host/16.15/plugins/pg_repack-v1.5.3-pg16.x86_64.tar.gz lib share b
 |------|-----|------|
 | `-C lib` | - | 只编译 lib 目录 |
 | `USE_PGXS` | `1` | 使用 PGXS |
+| `PG_CPPFLAGS` | `-I$PG_INCLUDE -I$PG_INTERNAL_INCLUDE -I$PG_SERVER_INCLUDE` | 头文件路径 |
 
 ### 打包参数
 
@@ -170,6 +170,7 @@ tar -czf dist/host/16.15/plugins/pg_repack-v1.5.3-pg16.x86_64.tar.gz lib share b
 | `pkglibdir` | `$tmp_dest/lib/postgresql` | 库文件目录 |
 | `datadir` | `$tmp_dest/share/postgresql` | 数据文件目录 |
 | `sharedir` | `$tmp_dest/share/postgresql` | 共享文件目录 |
+| `includedir_server` | `$tmp_dest/include/postgresql/server` | 服务器头文件目录 |
 
 ---
 
@@ -194,15 +195,24 @@ pg_repack-v1.5.3-pg16.x86_64.tar.gz
 
 ## RPATH 说明
 
-pg_repack 客户端需要链接 libpq，通过 RPATH 设置运行时库搜索路径：
+pg_repack 包含客户端工具和扩展库两部分，RPATH 分别处理：
+
+### bin/ 客户端工具
+
+编译时通过 LDFLAGS 设置 RPATH：
 
 ```bash
-# 编译时设置
-LDFLAGS="-L$PG_SRC/src/common -L$PG_SRC/src/port -L$dist/lib -Wl,-rpath=\$\$ORIGIN/../lib"
+LDFLAGS="-L$PG_SRC/src/common -L$PG_SRC/src/port -L$DIST_DIR/lib -Wl,-rpath=\$\$ORIGIN/../lib"
+# $$ORIGIN/../lib → 指向便携包 lib/ 目录下的 libpq
+```
 
-# RPATH 含义
-$$ORIGIN     → 可执行文件所在目录
-/../lib      → 上级目录的 lib 子目录
+### lib/postgresql/ 扩展库
+
+打包阶段通过 `fix_rpath` 自动修复：
+
+```bash
+fix_rpath "$tmp_dest" "lib/postgresql"
+# → patchelf --set-rpath '$ORIGIN/..'
 ```
 
 ### 验证 RPATH
@@ -210,6 +220,9 @@ $$ORIGIN     → 可执行文件所在目录
 ```bash
 readelf -d pg_repack | grep -E "RPATH|RUNPATH"
 # 输出: RPATH: [$ORIGIN/../lib]
+
+readelf -d lib/postgresql/pg_repack.so | grep -E "RPATH|RUNPATH"
+# 输出: RPATH: [$ORIGIN/..]
 ```
 
 ---
@@ -334,21 +347,21 @@ pg_repack -d mydb -t mytable --wait-timeout 300
 # 使用 verbose 模式
 pg_repack -d mydb -t mytable --elevel debug
 
-# 查看编译日志
-cat build/host/16.15/pg_repack_v1.5.3/pg_repack.log
+# 查看编译日志 (run_or_die 失败时会自动打印最后 30 行)
+cat build/host/16.15/pg_repack.log
 ```
 
 ### 手动测试
 
 ```bash
 # 复制插件到 PostgreSQL
-cp build/host/16.15/pg_repack_v1.5.3/tmp_install/bin/pg_repack \
+cp build/host/16.15/tmp_install/bin/pg_repack \
    dist/host/16.15/pgsql/bin/
 
-cp build/host/16.15/pg_repack_v1.5.3/tmp_install/lib/postgresql/pg_repack.so \
+cp build/host/16.15/tmp_install/lib/postgresql/pg_repack.so \
    dist/host/16.15/pgsql/lib/postgresql/
 
-cp build/host/16.15/pg_repack_v1.5.3/tmp_install/share/postgresql/extension/* \
+cp build/host/16.15/tmp_install/share/postgresql/extension/* \
    dist/host/16.15/pgsql/share/postgresql/extension/
 
 # 创建扩展

@@ -1,25 +1,31 @@
 #!/bin/bash
+# ==========================================================
+# plugin.pg_repack.sh - pg_repack 插件编译脚本
+# ==========================================================
+# 目录结构:
+#   deps/   - 编译依赖库 (openssl, zlib, icu, ncurses, libedit)
+#   dist/   - 最终产物目录 (PostgreSQL + 插件)，只读
+#   build/  - 编译工作目录，每次清理重建
+#   cache/  - 源代码包缓存，避免重复下载
+#
+# 依赖 plugin.common.sh:
+#   log_info / log_warn / log_error / log_success / log_section
+#   run_or_die / verify_file / download / extract_source
+#   detect_jobs / detect_arch / get_version
+#   init_plugin_dirs / require_pg_config
+#   analyze_dir / strip_package / fix_rpath
+#
+# 打包流程: 下载 → 编译(bin+lib) → 安装 → strip → RPATH → 依赖分析 → 打包
+#
+# 注意: pg_repack 的 GitHub tag 格式是 ver_1.5.3 (带 ver_ 前缀)
+# ==========================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/plugin.common.sh"
 
 # ==========================================================
-# ������ 目录结构说明
-# ==========================================================
-# deps/   - 编译依赖库 (openssl, zlib, icu, ncurses, libedit)
-#          重要性: pg_repack 需要这些库的头文件和静态库
-#
-# dist/   - 最终产物目录 (PostgreSQL + 插件)
-#          重要性: 包含已编译的 PostgreSQL，提供 pg_config 和头文件
-#          注意: 只读，不写入，仅用于获取编译参数
-#
-# build/  - 编译工作目录
-#          重要性: 存放 pg_repack 源代码和编译中间文件
-#          每次编译会清理重建
-#
-# cache/  - 源代码包缓存
-#          重要性: 避免重复下载，加速编译
-# ==========================================================
-
-# ==========================================================
-# 默认版本 (可通过参数覆盖)
+# 默认版本 (可通过参数或环境变量覆盖)
 # ==========================================================
 DEFAULT_PG_REPACK_VERSION="1.5.3"
 
@@ -28,7 +34,7 @@ DEFAULT_PG_REPACK_VERSION="1.5.3"
 # ==========================================================
 plugin_info() {
     local plugin_version="${1:-$DEFAULT_PG_REPACK_VERSION}"
-    
+
     cat << EOF
 {
   "name": "pg_repack",
@@ -44,49 +50,42 @@ EOF
 # 使用说明
 # ==========================================================
 show_usage() {
-    echo "用法: $0 {info|build} [参数...]"
-    echo ""
-    echo "模式:"
-    echo "  info [版本]                - 返回插件元信息 (JSON格式)"
-    echo "  build <triple> <PG版本> [插件版本]  - 编译打包插件"
-    echo ""
-    echo "示例:"
-    echo "  $0 info                    # 使用默认版本 ${DEFAULT_PG_REPACK_VERSION}"
-    echo "  $0 info 1.5.0              # 指定版本 1.5.0"
-    echo "  $0 build host 16.15        # 使用默认版本 ${DEFAULT_PG_REPACK_VERSION}"
-    echo "  $0 build host 16.15 1.5.0  # 指定版本 1.5.0"
-    echo "  $0 build x86_64-linux-gnu 16.15  # 交叉编译 x86_64"
-    echo "  $0 build aarch64-linux-gnu 16.15 # 交叉编译 ARM64"
-}
+    cat << EOF
+用法: $0 {info|build} [参数...]
 
-# ==========================================================
-# 获取版本号 (优先级: 参数 > 环境变量 > 默认值)
-# ==========================================================
-get_version() {
-    local version="${1:-}"
-    if [ -n "$version" ]; then
-        echo "$version"
-    elif [ -n "$PG_REPACK_VERSION" ]; then
-        echo "$PG_REPACK_VERSION"
-    else
-        echo "$DEFAULT_PG_REPACK_VERSION"
-    fi
+模式:
+  info [版本]                        - 返回插件元信息 (JSON格式)
+  build <triple> <PG版本> [插件版本] [选项]  - 编译打包插件
+
+选项:
+  --jobs <n>                         - 并行编译数 (默认: CPU核心数)
+  --no-strict                        - 依赖分析只报告不失败 (默认严格)
+
+示例:
+  $0 info                            # 使用默认版本 ${DEFAULT_PG_REPACK_VERSION}
+  $0 info 1.5.0                      # 指定版本 1.5.0
+  $0 build host 16.15                # 使用默认版本 ${DEFAULT_PG_REPACK_VERSION}
+  $0 build host 16.15 1.5.0          # 指定版本 1.5.0
+  $0 build host 16.15 --jobs 8       # 指定并行数
+  $0 build x86_64-linux-gnu 16.15    # 交叉编译 x86_64
+  $0 build aarch64-linux-gnu 16.15   # 交叉编译 ARM64
+EOF
 }
 
 # ==========================================================
 # 主入口: 模式分发
 # ==========================================================
-if [ "$1" == "info" ]; then
+if [ "${1:-}" == "info" ]; then
     shift
-    plugin_version=$(get_version "$1")
+    plugin_version=$(get_version "${1:-}" "PG_REPACK_VERSION" "$DEFAULT_PG_REPACK_VERSION")
     plugin_info "$plugin_version"
     exit 0
 fi
 
-if [ "$1" == "build" ]; then
+if [ "${1:-}" == "build" ]; then
     shift
 else
-    if [ "$1" == "" ] || [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
+    if [ "${1:-}" == "" ] || [ "${1:-}" == "-h" ] || [ "${1:-}" == "--help" ]; then
         show_usage
         exit 1
     fi
@@ -95,122 +94,100 @@ fi
 # ==========================================================
 # build 模式: 参数解析
 # ==========================================================
-if [ "$1" == "" ] || [ "$2" == "" ]; then
-    echo "错误: build 模式需要 <triple> 和 <PG版本>"
-    echo ""
+if [ "${1:-}" == "" ] || [ "${2:-}" == "" ]; then
+    echo "错误: build 模式需要 <triple> 和 <PG版本>" >&2
+    echo "" >&2
     show_usage
     exit 1
 fi
 
 triple=$1
 version=$2
-pg_repack_version=$(get_version "$3")
+shift 2
 
-numcpus=$(nproc --all)
+# 可选插件版本 (三段式 x.y.z)
+if [[ "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    pg_repack_version="$1"
+    shift
+else
+    pg_repack_version=$(get_version "" "PG_REPACK_VERSION" "$DEFAULT_PG_REPACK_VERSION")
+fi
+
+# 其余选项
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --jobs)
+            if [ -z "${2:-}" ]; then
+                echo "错误: --jobs 需要一个参数" >&2
+                exit 1
+            fi
+            JOBS="$2"
+            shift 2
+            ;;
+        --no-strict)
+            ANALYZE_STRICT=0
+            shift
+            ;;
+        *)
+            echo "错误: 未知选项: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+jobs=$(detect_jobs)
 
 # ==========================================================
 # 架构映射
 # ==========================================================
-case $triple in
-    x86_64-*linux*)
-        arch=x86_64
-        ;;
-    aarch64-*linux*)
-        arch=aarch64
-        ;;
-    s390x-*linux*)
-        arch=s390x
-        ;;
-    arm-*linux*)
-        arch=armv7l
-        ;;
-    host)
-        arch=$(uname -m)
-        ;;
-    *)
-        echo "错误: 不支持的目标平台: $triple"
-        exit 1
-        ;;
-esac
-
-basedir=$(dirname $(readlink -f $0))
+arch=$(detect_arch "$triple") || {
+    echo "错误: 不支持的目标平台: $triple" >&2
+    exit 1
+}
 
 # ==========================================================
-# 注意: pg_repack 的 tag 格式是 ver_1.5.3 (带 ver_ 前缀)
+# 目录初始化 + PostgreSQL 检查
 # ==========================================================
+init_plugin_dirs "$SCRIPT_DIR" "$triple" "$version"
+require_pg_config "$triple"
+
 pg_repack_tar="pg_repack-${pg_repack_version}.tar.gz"
 
-deps="$basedir/deps/$triple"
-dist="$basedir/dist/$triple/$version/pgsql"
-build="$basedir/build/$triple/$version/pg_repack_v${pg_repack_version}"
-pg_src="$basedir/build/$triple/$version/postgresql"
-cache="$basedir/cache"
-plugins_dir="$basedir/dist/$triple/$version/plugins"
+# pg_repack 编译 bin/ 时需要 PostgreSQL 源码树 (libpgcommon.a / libpgport.a)
+pg_src="$BUILD_DIR/postgresql"
 
-mkdir -p "$build" "$cache" "$plugins_dir"
-
-if [ ! -f "$dist/bin/pg_config" ]; then
-    echo "错误: 找不到 pg_config: $dist/bin/pg_config"
-    echo "请先为 $triple 编译安装 PostgreSQL"
-    exit 1
-fi
-
-log_with_time() {
-    echo "[$(date +%H:%M:%S.%03N)] $1" >&2
+# ==========================================================
+# 下载 pg_repack 源代码包
+# ==========================================================
+# 注意: tag 格式是 ver_1.5.3
+download_pg_repack() {
+    download "$pg_repack_tar" \
+        "https://github.com/reorg/pg_repack/archive/refs/tags/ver_${pg_repack_version}.tar.gz"
 }
 
 # ==========================================================
-# 通用下载函数
+# 解析 PostgreSQL 编译环境 (PG_CONFIG / PGXS / 头文件路径)
 # ==========================================================
-download() {
-    if [ -f "$cache/$1" ]; then
-        log_with_time "缓存命中: $1"
-    else
-        log_with_time "下载中: $1"
-        log_with_time "目标 URL: $2"
-        if ! curl -L -o "$cache/$1" "$2" --connect-timeout 60 --max-time 300 --retry 3 --retry-delay 2 --progress-bar; then
-            log_with_time "下载失败: $1!"
-            exit 1
-        fi
-        log_with_time "下载完成: $1"
-    fi
-}
+# 导出: PG_CONFIG_BIN PGXS_FILE PG_CPPFLAGS
+resolve_pg_env() {
+    PG_CONFIG_BIN="$DIST_DIR/bin/pg_config"
 
-# ==========================================================
-# 编译 pg_repack
-# ==========================================================
-build_pg_repack() {
-    log="$build/pg_repack.log"
-    rm -f "$log"
-    
-    cd "$basedir/build/$triple/$version"
-    rm -rf "pg_repack_v${pg_repack_version}"
-    mkdir -p "pg_repack_v${pg_repack_version}"
-    tar xf "$cache/$pg_repack_tar" -C "pg_repack_v${pg_repack_version}" --strip-components 1
-    cd "pg_repack_v${pg_repack_version}"
-
-    log_with_time "配置编译环境: pg_repack v${pg_repack_version}"
-    log_with_time "   构建目录: $(pwd)"
-    
-    PG_CONFIG_BIN="$dist/bin/pg_config"
-    
-    # ==========================================================
-    # 头文件路径定义
-    #   $dist/include/                      → libpq-fe.h, postgres_ext.h
-    #   $dist/include/postgresql/server/    → postgres.h, elog.h
-    #   $dist/include/postgresql/internal/  → pqexpbuffer.h (pg_repack 需要)
-    # ==========================================================
-    PG_INCLUDE="$dist/include"
-    PG_SERVER_INCLUDE="$dist/include/postgresql/server"
-    PG_INTERNAL_INCLUDE="$dist/include/postgresql/internal"
-    
-    PGXS_FILE=$(find "$dist" -name "pgxs.mk" 2>/dev/null | head -1)
-    if [ -z "$PGXS_FILE" ]; then
-        log_with_time "错误: 找不到 pgxs.mk"
+    if [ ! -x "$PG_CONFIG_BIN" ]; then
+        log_error "pg_config 不可执行: $PG_CONFIG_BIN"
         exit 1
     fi
-    
-    export PATH="$dist/bin:$PATH"
+
+    local pg_include="$DIST_DIR/include"
+    local pg_server_include="$DIST_DIR/include/postgresql/server"
+    local pg_internal_include="$DIST_DIR/include/postgresql/internal"
+
+    PGXS_FILE=$(find "$DIST_DIR" -name "pgxs.mk" 2>/dev/null | head -1)
+    if [ -z "$PGXS_FILE" ]; then
+        log_error "找不到 pgxs.mk (在 $DIST_DIR 下)"
+        exit 1
+    fi
+
+    export PATH="$DIST_DIR/bin:$PATH"
 
     if [ "$triple" != "host" ]; then
         export CC="$triple-gcc"
@@ -220,183 +197,202 @@ build_pg_repack() {
         export STRIP="strip"
     fi
 
-    log_with_time "   PG_CONFIG: $PG_CONFIG_BIN"
-    log_with_time "   PGXS:      $PGXS_FILE"
-
-    PG_CPPFLAGS="-I$PG_INCLUDE -I$PG_INTERNAL_INCLUDE -I$PG_SERVER_INCLUDE"
-    
-    if [ -d "$deps/usr/include" ]; then
-        PG_CPPFLAGS="$PG_CPPFLAGS -I$deps/usr/include"
+    # 头文件路径:
+    #   $DIST_DIR/include/                      → libpq-fe.h, postgres_ext.h
+    #   $DIST_DIR/include/postgresql/server/    → postgres.h, elog.h
+    #   $DIST_DIR/include/postgresql/internal/  → pqexpbuffer.h (pg_repack 需要)
+    PG_CPPFLAGS="-I$pg_include -I$pg_internal_include -I$pg_server_include"
+    if [ -d "$DEPS_DIR/usr/include" ]; then
+        PG_CPPFLAGS="$PG_CPPFLAGS -I$DEPS_DIR/usr/include"
     fi
 
-    log_with_time "   PG_CPPFLAGS: $PG_CPPFLAGS"
+    log_info "   PG_CONFIG:   $PG_CONFIG_BIN"
+    log_info "   PGXS:        $PGXS_FILE"
+    log_info "   PG_CPPFLAGS: $PG_CPPFLAGS"
+}
 
-    # ==========================================================
-    # 编译 bin/ 目录 (客户端工具)
-    # 依赖: libpgcommon.a, libpgport.a, libpq
-    # 使用 RPATH 指定运行时搜索便携版 libpq
-    # 参考 portable-build.sh 使用 \$ORIGIN 转义
-    # ==========================================================
-    log_with_time "编译 pg_repack 客户端 (bin/) v${pg_repack_version}"
-    
-    if ! make -C bin USE_PGXS=1 \
+# ==========================================================
+# 检查 PostgreSQL 源码树 (bin/ 编译需要 libpgcommon.a / libpgport.a)
+# ==========================================================
+require_pg_source() {
+    if [ ! -d "$pg_src/src/common" ] || [ ! -d "$pg_src/src/port" ]; then
+        log_error "缺少 PostgreSQL 源码树: $pg_src"
+        log_error "pg_repack 的 bin/ 编译需要 libpgcommon.a / libpgport.a"
+        log_error "请确认 PostgreSQL 编译时保留了源码目录 (postgresql/)"
+        exit 1
+    fi
+}
+
+# ==========================================================
+# 编译 pg_repack
+# ==========================================================
+build_pg_repack() {
+    local log="$BUILD_DIR/pg_repack.log"
+    : >"$log"
+
+    log_section "编译 pg_repack v${pg_repack_version}"
+
+    local src_dir="$BUILD_DIR/pg_repack_v${pg_repack_version}"
+    rm -rf "$src_dir"
+
+    extract_source "$CACHE_DIR/$pg_repack_tar" "$src_dir" 1 \
+        || { log_error "pg_repack 解压失败!"; exit 1; }
+
+    cd "$src_dir"
+    log_info "构建目录: $(pwd)"
+
+    resolve_pg_env
+    require_pg_source
+
+    # ------------------------------------------------------
+    # 1. 编译 bin/ (客户端工具)
+    #    依赖: libpgcommon.a, libpgport.a, libpq
+    #    RPATH: $ORIGIN/../lib (便携包 lib/ 下的 libpq)
+    # ------------------------------------------------------
+    log_info "编译 pg_repack 客户端 (bin/) v${pg_repack_version}"
+
+    run_or_die "pg_repack bin/ make" "$log" \
+        make -C bin USE_PGXS=1 \
             PG_CONFIG="$PG_CONFIG_BIN" \
             PGXS="$PGXS_FILE" \
             PG_CPPFLAGS="$PG_CPPFLAGS" \
-            LDFLAGS="-L$pg_src/src/common -L$pg_src/src/port -L$dist/lib -Wl,-rpath=\$\$ORIGIN/../lib" \
-            -j$numcpus >>"$log" 2>>"$log"; then
-        log_with_time "bin/ 编译失败!"
-        cat "$log" | tail -60
-        exit 1
-    fi
- 
-    # ==========================================================
-    # 编译 lib/ 目录 (扩展库)
-    # 不需要额外链接，由 PostgreSQL 服务器加载
-    # ==========================================================
-    log_with_time "编译 pg_repack 扩展 (lib/) v${pg_repack_version}"
-    
-    if ! make -C lib USE_PGXS=1 \
+            LDFLAGS="-L$pg_src/src/common -L$pg_src/src/port" \
+            -j"$jobs"
+
+    # ------------------------------------------------------
+    # 2. 编译 lib/ (扩展库, 由 PostgreSQL 服务器加载)
+    # ------------------------------------------------------
+    log_info "编译 pg_repack 扩展 (lib/) v${pg_repack_version}"
+
+    run_or_die "pg_repack lib/ make" "$log" \
+        make -C lib USE_PGXS=1 \
             PG_CONFIG="$PG_CONFIG_BIN" \
             PGXS="$PGXS_FILE" \
             PG_CPPFLAGS="$PG_CPPFLAGS" \
-            -j$numcpus >>"$log" 2>>"$log"; then
-        log_with_time "lib/ 编译失败!"
-        cat "$log" | tail -60
-        exit 1
-    fi
+            -j"$jobs"
 
-    log_with_time "✅ 编译成功!"
-    
-    echo "$(pwd)"
+    log_success "pg_repack 编译成功!"
 }
 
 # ==========================================================
 # 打包 pg_repack
 # ==========================================================
+# 流程: make install → strip → RPATH → 依赖分析 → 打包
 package_pg_repack() {
-    local build_dir="$1"
-    
-    if [ -z "$build_dir" ] || [ ! -d "$build_dir" ]; then
-        log_with_time "错误: 构建目录不存在: $build_dir"
-        exit 1
-    fi
-    
-    cd "$build_dir"
-
-    PG_CONFIG_BIN="$dist/bin/pg_config"
-    PGXS_FILE=$(find "$dist" -name "pgxs.mk" 2>/dev/null | head -1)
-
+    local pg_major
     pg_major=$(echo "$version" | cut -d. -f1)
-    pkg_name="pg_repack-v${pg_repack_version}-pg${pg_major}.${arch}.tar.gz"
-    pkg_path="$plugins_dir/$pkg_name"
-    
-    log_with_time "打包中: $pkg_path"
 
-    # ==========================================================
-    # 使用 make install 安装到临时目录
-    # 覆盖所有路径变量，从源头避免套娃
-    # ==========================================================
-    tmp_dest="$build/tmp_install"
+    local pkg_name="pg_repack-v${pg_repack_version}-pg${pg_major}.${arch}.tar.gz"
+    local pkg_path="$PLUGINS_DIR/$pkg_name"
+
+    log_section "打包 pg_repack"
+    log_info "目标: $pkg_path"
+
+    resolve_pg_env
+
+    # ------------------------------------------------------
+    # 1. 安装到临时目录 (PGXS 标准布局)
+    # ------------------------------------------------------
+    local tmp_dest="$BUILD_DIR/tmp_install"
     rm -rf "$tmp_dest"
     mkdir -p "$tmp_dest"
 
-    if ! make USE_PGXS=1 \
+    log_info "安装中..."
+
+    run_or_die "pg_repack install" "$BUILD_DIR/pg_repack.log" \
+        make USE_PGXS=1 \
             PG_CONFIG="$PG_CONFIG_BIN" \
             PGXS="$PGXS_FILE" \
             bindir="$tmp_dest/bin" \
             pkglibdir="$tmp_dest/lib/postgresql" \
             datadir="$tmp_dest/share/postgresql" \
             sharedir="$tmp_dest/share/postgresql" \
-            includedir_server="$tmp_dest/postgresql/include/server" \
-            install >>"$build/pg_repack.log" 2>>"$build/pg_repack.log"; then
-        log_with_time "安装失败!"
-        cat "$build/pg_repack.log" | tail -50
+            includedir_server="$tmp_dest/include/postgresql/server" \
+            install
+
+    if [ ! -d "$tmp_dest" ] || [ -z "$(ls -A "$tmp_dest" 2>/dev/null)" ]; then
+        log_error "安装目录为空: $tmp_dest"
         exit 1
     fi
 
-    # ==========================================================
-    # 直接切入 tmp_dest 根目录打包
-    # ==========================================================
+    # ------------------------------------------------------
+    # 2. strip 瘦身 (.so + bin)
+    # ------------------------------------------------------
+    if command -v strip >/dev/null 2>&1; then
+        local so_count=0 bin_count=0
+        so_count=$(find "$tmp_dest/lib" -name "*.so*" -type f 2>/dev/null | wc -l)
+        bin_count=$(find "$tmp_dest/bin" -type f -executable 2>/dev/null | wc -l)
+        if [ "$so_count" -gt 0 ] || [ "$bin_count" -gt 0 ]; then
+            log_info "strip 瘦身中 ($so_count 个 .so, $bin_count 个 bin)..."
+            find "$tmp_dest/lib" -name "*.so*" -type f \
+                -exec strip --strip-unneeded {} \; 2>/dev/null || true
+            find "$tmp_dest/bin" -type f -executable \
+                -exec strip --strip-all {} \; 2>/dev/null || true
+        fi
+    else
+        log_warn "strip 未找到，跳过瘦身"
+    fi
+
+    # ------------------------------------------------------
+    # 3. RPATH 修复
+    #    - bin/ 工具: $ORIGIN/../lib (指向同包 lib/, 便携 libpq)
+    #    - lib/postgresql/*.so: $ORIGIN/.. (由 PostgreSQL 加载, 依赖 PG 侧 lib)
+    # ------------------------------------------------------
+    fix_rpath "$tmp_dest" "lib/postgresql"
+
+    # ------------------------------------------------------
+    # 4. 依赖分析 (打包之前, 严格模式)
+    # ------------------------------------------------------
+    log_info "依赖分析中..."
+    if ! analyze_dir "$tmp_dest"; then
+        log_error "依赖分析失败，放弃打包"
+        exit 1
+    fi
+
+    # ------------------------------------------------------
+    # 5. 进入安装目录打包
+    # ------------------------------------------------------
     cd "$tmp_dest"
 
-    # 动态抓取存在的顶级短目录打包
-    TAR_DIRS=""
-    [ -d "lib" ] && TAR_DIRS="$TAR_DIRS lib"
-    [ -d "share" ] && TAR_DIRS="$TAR_DIRS share"
-    [ -d "bin" ] && TAR_DIRS="$TAR_DIRS bin"
-    [ -d "include" ] && TAR_DIRS="$TAR_DIRS include"
+    local dirs=()
+    for d in lib share bin include; do
+        [ -d "$d" ] && dirs+=("$d")
+    done
 
-    if [ -z "$TAR_DIRS" ]; then
-        log_with_time "错误: 没有可打包的目录 (lib/share/bin/include 均不存在)"
+    if [ ${#dirs[@]} -eq 0 ]; then
+        log_error "没有可打包的目录 (lib/share/bin/include 均不存在)"
         exit 1
     fi
 
-    tar -czf "$pkg_path" $TAR_DIRS 2>/dev/null
+    log_info "打包目录: ${dirs[*]}"
 
-    # ==========================================================
-    # 依赖分析：遍历所有 .so 和 bin 程序
-    # ==========================================================
-    log_with_time "依赖分析中..."
-    
-    tmp_check="$build/pkg_check"
-    rm -rf "$tmp_check"
-    mkdir -p "$tmp_check"
-    tar -xzf "$pkg_path" -C "$tmp_check"
-    
-    echo ""
-    echo "=========================================="
-    echo "������ 依赖检查:"
-    echo "=========================================="
-    
-    # 遍历所有 .so 文件
-    find "$tmp_check" -name "*.so" -type f 2>/dev/null | while read -r so; do
-        rel_path="${so#$tmp_check/}"
-        echo ""
-        echo "������ $rel_path 依赖:"
-        ldd "$so" 2>/dev/null | grep -E "=>|not found" || echo "   (无动态依赖或非 ELF 文件)"
-    done
-    
-    # 遍历所有 bin 目录下的可执行文件
-    if [ -d "$tmp_check/bin" ]; then
-        find "$tmp_check/bin" -type f -executable 2>/dev/null | while read -r bin; do
-            rel_path="${bin#$tmp_check/}"
-            echo ""
-            echo "������ $rel_path 依赖:"
-            ldd "$bin" 2>/dev/null | grep -E "=>|not found" || echo "   (无动态依赖或非 ELF 文件)"
-            echo ""
-            echo "������ $rel_path RPATH/RUNPATH:"
-            readelf -d "$bin" 2>/dev/null | grep -E "RPATH|RUNPATH" || echo "   (未设置 RPATH/RUNPATH)"
-        done
-    fi
-    
-    rm -rf "$tmp_check"
-    
-    echo ""
-    echo "=========================================="
+    tar -czf "$pkg_path" "${dirs[@]}"
 
-    # 保留临时目录用于调试
-    # rm -rf "$tmp_dest"
-
-    log_with_time "✅ 打包完成: $pkg_path"
+    log_success "打包完成: $pkg_path"
     ls -lh "$pkg_path"
-    
-    echo ""
-    echo "=========================================="
-    echo "完成! pg_repack v${pg_repack_version} 已打包"
-    echo "   包路径: $pkg_path"
-    echo "   包内容:"
-    tar -tzf "$pkg_path"
-    echo "=========================================="
+
+    # ------------------------------------------------------
+    # 6. 完成信息
+    # ------------------------------------------------------
+    echo "" >&2
+    echo "==========================================" >&2
+    echo "完成! pg_repack v${pg_repack_version} 已打包" >&2
+    echo "   包路径: $pkg_path" >&2
+    echo "   包大小: $(du -h "$pkg_path" | cut -f1)" >&2
+    echo "   包内容:" >&2
+    tar -tzf "$pkg_path" >&2
+    echo "==========================================" >&2
 }
 
 # ==========================================================
 # build 模式: 主流程
 # ==========================================================
-log_with_time "开始构建 pg_repack v${pg_repack_version} (目标: $triple, PG: $version)"
+log_section "开始构建 pg_repack v${pg_repack_version} (目标: $triple, PG: $version)"
+log_info "并行编译数: $jobs"
+log_info "依赖分析严格模式: ${ANALYZE_STRICT:-1}"
 
-download "$pg_repack_tar" "https://github.com/reorg/pg_repack/archive/refs/tags/ver_${pg_repack_version}.tar.gz"
+download_pg_repack
 
-build_dir=$(build_pg_repack)
+build_pg_repack
 
-package_pg_repack "$build_dir"
+package_pg_repack

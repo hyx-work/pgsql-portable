@@ -18,6 +18,8 @@ TimescaleDB 是一个开源的时间序列数据库，作为 PostgreSQL 扩展�
 | **GCC/G++** | 支持 C++17 | 编译器 |
 | **PostgreSQL** | 已编译 | 提供 pg_config 和头文件 |
 | **OpenSSL** | - | 加密通信支持 |
+| **patchelf** | - | 修复 RPATH（可选，未安装时跳过） |
+| **plugin.common.sh** | - | 公共库（自动 source，无需手动引入） |
 
 ### CentOS 7 安装 CMake
 
@@ -139,11 +141,17 @@ pgsql-portable/
 # 编译当前主机架构
 ./plugin.timescaledb.sh build host 16.15
 
-# 交叉编译 ARM64
-./plugin.timescaledb.sh build aarch64-linux-gnu 16.15
-
 # 指定 TimescaleDB 版本
 ./plugin.timescaledb.sh build host 16.15 2.29.2
+
+# 指定并行编译数
+./plugin.timescaledb.sh build host 16.15 --jobs 8
+
+# 依赖分析只报告不失败（非严格模式）
+./plugin.timescaledb.sh build host 16.15 --no-strict
+
+# 交叉编译 ARM64
+./plugin.timescaledb.sh build aarch64-linux-gnu 16.15
 ```
 
 ### 查看插件信息
@@ -175,26 +183,24 @@ pgsql-portable/
 
 ## 编译流程
 
+脚本自动执行以下步骤，所有命令通过 `run_or_die` 包裹，失败时自动打印日志并终止。
+
 ### 1. 下载源码
 
-```bash
-# 源码包缓存位置
-cache/timescaledb-2.29.2.tar.gz
-
-# 下载地址
-https://github.com/timescale/timescaledb/archive/refs/tags/2.29.2.tar.gz
+```
+下载地址: https://github.com/timescale/timescaledb/archive/refs/tags/{version}.tar.gz
+缓存位置: cache/timescaledb-{version}.tar.gz
 ```
 
 ### 2. CMake 配置
 
 ```bash
+# 脚本内部执行 (require_cmake → resolve_pg_env → run_or_die)
 cmake -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/ \
-    -DCMAKE_INSTALL_LIBDIR="lib/postgresql" \
-    -DCMAKE_INSTALL_DATADIR="share/postgresql" \
-    -DPG_CONFIG="/path/to/pg_config" \
-    -DCMAKE_PREFIX_PATH="/path/to/deps/usr" \
+    -DPG_CONFIG="$PG_CONFIG_BIN" \
+    -DCMAKE_PREFIX_PATH="$DEPS_DIR/usr" \
     -DUSE_OPENSSL=ON \
     -DSEND_TELEMETRY_DEFAULT=OFF \
     -DREGRESS_CHECKS=OFF \
@@ -202,28 +208,31 @@ cmake -B build \
     -DPG_LIBDIR="/lib/postgresql" \
     -DPG_PKGLIBDIR="/lib/postgresql" \
     -DPG_SHAREDIR="/share/postgresql" \
-    -DPG_DATADIR="/share/postgresql" \
-    -DPG_INCLUDEDIR="/include/postgresql"
+    -DPG_DATADIR="/share/postgresql"
 ```
 
 ### 3. 编译
 
 ```bash
-cmake --build build -j $(nproc)
+# 脚本内部执行 (run_or_die)
+cmake --build build -j "$jobs"
 ```
 
-### 4. 影子安装
+### 4. DESTDIR 影子安装
 
 ```bash
+# 脚本内部执行 (run_or_die)
 # 使用 DESTDIR 环境变量（不要使用 --destdir 参数）
-DESTDIR="/tmp/timescaledb_install" cmake --install .
+env DESTDIR="$tmp_dest" cmake --install .
 ```
 
 ### 5. 打包
 
-```bash
-cd /tmp/timescaledb_install
-tar -czf timescaledb-v2.29.2-pg16.x86_64.tar.gz lib share
+```
+瘦身: strip --strip-unneeded (仅 .so 文件)
+RPATH修复: fix_rpath (patchelf 设置 $ORIGIN/..)
+分析: analyze_dir 依赖检查 (ldd + RPATH)
+打包: tar -czf → dist/host/16.15/plugins/timescaledb-v2.29.2-pg16.x86_64.tar.gz
 ```
 
 ---
@@ -395,8 +404,9 @@ ls -la $deps/usr/lib/*.a
 ### 编译后验证
 
 ```bash
-# 检查 .so 文件依赖
-ldd $tmp_dest/lib/postgresql/timescaledb.so
+# 脚本自动执行 analyze_dir 进行依赖分析
+# 也可以手动检查:
+ldd $BUILD_DIR/tmp_install/lib/postgresql/timescaledb.so
 
 # 应该只依赖系统库（libc、libpthread 等）
 # 不应该依赖 OpenSSL、ICU 等（已静态链接）
@@ -439,11 +449,11 @@ ldd $tmp_dest/lib/postgresql/timescaledb.so
 ### 交叉编译环境变量
 
 ```bash
-# 脚本自动设置
+# 脚本自动设置 (resolve_pg_env)
 export CC="${triple}-gcc"
 export CXX="${triple}-g++"
 export STRIP="${triple}-strip"
-export PKG_CONFIG_PATH="$deps/usr/lib/pkgconfig"
+export PKG_CONFIG_PATH="$DEPS_DIR/usr/lib/pkgconfig"
 ```
 
 ---

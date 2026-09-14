@@ -3,6 +3,8 @@ build/*
 !build/.gitkeep
 deps/*
 !deps/.gitkeep
+!tool/
+!tool/**
 dist/*
 !dist/.gitkeep
 cache/*
@@ -52,8 +54,11 @@ Desktop.ini
 # Package files
 *.tar
 *.tar.gz
+!tool/*.tar.gz
 *.tar.bz2
+!tool/*.tar.bz2
 *.tar.xz
+!tool/*.tar.xz
 *.tgz
 *.rpm
 *.deb

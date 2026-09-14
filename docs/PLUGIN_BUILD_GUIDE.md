@@ -2,7 +2,7 @@
 
 ## 概述
 
-本文档记录了 `pgsql-portable` 项目中所有插件的便携编译过程，包括 pg_cron、pg_repack、pgvector 和 TimescaleDB。
+本文档记录了 `pgsql-portable` 项目中所有插件的便携编译过程，包括 pg_cron、pg_repack、pgvector、TimescaleDB 和 PostGIS。
 
 所有插件遵循统一的编译规范，生成符合便携标准的插件包。
 
@@ -16,6 +16,7 @@
 | **pg_repack** | 1.5.3 | 在线表重组 | 否 | PGXS |
 | **pgvector** | 0.8.6 | 向量相似度搜索 | 否 | PGXS |
 | **TimescaleDB** | 2.29.2 | 时间序列数据库 | ✅ 是 | CMake |
+| **PostGIS** | 3.6.4 | 空间地理信息扩展 | 否 | Autotools |
 
 ---
 
@@ -29,14 +30,26 @@ pgsql-portable/
 │   ├── pg_cron-1.6.7.tar.gz
 │   ├── pg_repack-1.5.3.tar.gz
 │   ├── vector-0.8.6.tar.gz
-│   └── timescaledb-2.29.2.tar.gz
+│   ├── timescaledb-2.29.2.tar.gz
+│   ├── sqlite-autoconf-3440000.tar.gz
+│   ├── curl-8.4.0.tar.gz
+│   ├── geos-3.14.1.tar.bz2
+│   ├── proj-8.2.1.tar.gz
+│   ├── gdal-3.9.2.tar.xz
+│   ├── libxml2-2.9.14.tar.xz
+│   ├── json-c-0.17-20230812.tar.gz
+│   ├── protobuf-all-3.20.3.tar.gz
+│   ├── protobuf-c-1.4.1.tar.gz
+│   ├── pcre2-10.42.tar.gz
+│   └── postgis-3.6.4.tar.gz
 ├── build/
 │   └── host/
 │       └── 16.15/
 │           ├── pg_cron_v1.6.7/
 │           ├── pg_repack_v1.5.3/
 │           ├── vector_v0.8.6/
-│           └── timescaledb_v2.29.2/
+│           ├── timescaledb_v2.29.2/
+│           └── postgis_v3.6.4/
 ├── deps/
 │   └── host/usr/                   # 静态依赖库
 ├── dist/
@@ -47,7 +60,8 @@ pgsql-portable/
 │               ├── pg_cron-v1.6.7-pg16.x86_64.tar.gz
 │               ├── pg_repack-v1.5.3-pg16.x86_64.tar.gz
 │               ├── vector-v0.8.6-pg16.x86_64.tar.gz
-│               └── timescaledb-v2.29.2-pg16.x86_64.tar.gz
+│               ├── timescaledb-v2.29.2-pg16.x86_64.tar.gz
+│               └── postgis-v3.6.4-pg16.x86_64.tar.gz
 └── plugin.*.sh                     # 插件构建脚本
 ```
 
@@ -437,6 +451,205 @@ ORDER BY bucket;
 
 ---
 
+## PostGIS
+
+### 功能说明
+
+PostGIS 是 PostgreSQL 的空间地理信息扩展，提供地理对象、空间索引和空间查询功能，是 GIS 领域的标准数据库扩展。
+
+### 基本信息
+
+| 属性 | 值 |
+|------|-----|
+| 默认版本 | 3.6.4 |
+| 预加载 | 否 |
+| 官网 | https://postgis.net/ |
+| 构建系统 | Autotools |
+| 必需依赖 | GEOS 3.14.1, PROJ 8.2.1, SQLite3 3.44.0, CURL 8.4.0 |
+| 可选依赖 | GDAL 3.9.2, LibXML2 2.9.14, JSON-C 0.17, protobuf 3.20.3, protobuf-c 1.4.1, PCRE2 10.42 |
+
+### 编译命令
+
+```bash
+# 查看插件信息
+./plugin.postgis.sh info
+
+# 编译（使用默认版本）
+./plugin.postgis.sh build host 16.15
+
+# 编译（指定版本）
+./plugin.postgis.sh build host 16.15 3.6.4
+
+# 交叉编译 ARM64
+./plugin.postgis.sh build aarch64-linux-gnu 16.15
+
+# 跳过依赖编译
+./plugin.postgis.sh build host 16.15 --skip-deps
+```
+
+### 依赖编译
+
+PostGIS 的依赖需要编译到 `deps/` 目录：
+
+```bash
+# SQLite3 (PROJ 依赖)
+cd sqlite-autoconf-3440000
+./configure --prefix=/usr --disable-shared --enable-static --disable-readline
+make -j$(nproc) && make DESTDIR="$deps" install
+
+# CURL (PROJ 依赖)
+cd curl-8.4.0
+./configure --prefix=/usr --disable-shared --enable-static --without-ssl --without-zlib
+make -j$(nproc) && make DESTDIR="$deps" install
+
+# GEOS (几何引擎)
+cd geos-3.14.1
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF
+cmake --build build -j$(nproc) && env DESTDIR="$deps" cmake --install build
+
+# PROJ (坐标转换，依赖 SQLite3 + CURL)
+cd proj-8.2.1
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_SHARED_LIBS=OFF \
+    -DSQLITE3_INCLUDE_DIR="$deps/usr/include" -DSQLITE3_LIBRARY="$deps/usr/lib/libsqlite3.a" \
+    -DCURL_INCLUDE_DIR="$deps/usr/include" -DCURL_LIBRARY="$deps/usr/lib/libcurl.a"
+cmake --build build -j$(nproc) && env DESTDIR="$deps" cmake --install build
+
+# protobuf (protobuf-c 依赖)
+cd protobuf-3.20.3
+./configure --prefix=/usr --disable-shared --enable-static
+make -j$(nproc) && make DESTDIR="$deps" install
+
+# protobuf-c (MVT 矢量切片支持)
+cd protobuf-c-1.4.1
+export PATH="$deps/usr/bin:$PATH" PROTOC="$deps/usr/bin/protoc"
+./configure --prefix=/usr --disable-shared --enable-static LDFLAGS="-L$deps/usr/lib -static-libtool-libs"
+make -j$(nproc) && make DESTDIR="$deps" install
+```
+
+### Configure 参数
+
+```bash
+./configure \
+    --prefix=/usr \
+    --with-pgconfig=$PG_CONFIG_BIN \
+    --with-geosconfig=$deps/usr/bin/geos-config \
+    --with-projdir=$deps/usr \
+    --with-xml2config=$deps/usr/bin/xml2-config \
+    --with-json-c=$deps/usr \
+    --with-protobuf-c=$deps/usr \
+    --with-pcre-dir=$deps/usr \
+    --without-interrupt-tests
+```
+
+### 编译参数
+
+```bash
+make -j$(nproc)
+make DESTDIR=$tmp_dest install
+```
+
+### RPATH 配置
+
+使用 patchelf 修复 RPATH 以实现便携部署：
+
+```bash
+# .so 文件: $ORIGIN/.. (回退到上级目录找 libpq)
+patchelf --set-rpath '$ORIGIN/..' lib/postgis-3.so
+
+# bin 工具: $ORIGIN/../lib
+patchelf --set-rpath '$ORIGIN/../lib' bin/shp2pgsql
+```
+
+### 配置参数
+
+```sql
+-- 安装扩展
+CREATE EXTENSION postgis;
+
+-- 检查版本
+SELECT PostGIS_Version();
+
+-- 创建空间表
+CREATE TABLE spatial_data (
+    id SERIAL PRIMARY KEY,
+    name TEXT,
+    geom GEOMETRY(Point, 4326)
+);
+```
+
+### 使用示例
+
+```sql
+-- 创建 PostGIS 扩展
+CREATE EXTENSION postgis;
+
+-- 插入空间数据
+INSERT INTO spatial_data (name, geom)
+VALUES ('北京', ST_SetSRID(ST_MakePoint(116.404, 39.915), 4326));
+
+-- 空间查询（查找1000米内的点）
+SELECT name, ST_AsText(geom)
+FROM spatial_data
+WHERE ST_DWithin(
+    geom::geography,
+    ST_SetSRID(ST_MakePoint(116.404, 39.915), 4326)::geography,
+    1000
+);
+```
+
+### 常见问题
+
+**1. libtool .la 路径错误**
+
+错误：`libtool: error: cannot find the library '/usr/lib/libprotobuf.la'`
+
+原因：libtool 记录了绝对路径，移动库文件后路径失效
+
+解决：使用 `-static-libtool-libs` 参数强制静态链接
+```bash
+LDFLAGS="-L$deps/usr/lib -static-libtool-libs"
+```
+
+**2. C compiler cannot create executables**
+
+错误：`configure: error: C compiler cannot create executables`
+
+原因：编译环境问题（缺少依赖、路径错误等）
+
+解决：
+1. 检查 `config.log` 获取详细错误信息
+2. 确保已安装必要的编译工具
+3. 检查 `CFLAGS`、`LDFLAGS` 是否正确
+
+**3. GEOS C++ 异常崩溃**
+
+错误：`backend unexpectedly closed connection`
+
+解决：重新编译 PostgreSQL 并链接 C++ 标准库
+```bash
+LDFLAGS=-lstdc++ ./configure [其他参数]
+```
+
+**4. proj.db 缺失**
+
+错误：`cannot find proj.db`
+
+解决：确保 PROJ 数据文件已正确安装
+```bash
+ls $deps/usr/share/proj/
+```
+
+**5. protoc 未找到**
+
+警告：`protoc 未找到，protobuf-c 可能编译失败`
+
+解决：确保 protobuf 已正确编译并安装到 deps
+```bash
+ls $deps/usr/bin/protoc
+```
+
+---
+
 ## 编译流程对比
 
 ### 构建系统对比
@@ -447,6 +660,7 @@ ORDER BY bucket;
 | pg_repack | PGXS | make 参数 | make install |
 | pgvector | PGXS | make 参数 | make install |
 | TimescaleDB | CMake | cmake 参数 | DESTDIR + cmake --install |
+| PostGIS | Autotools | configure | make install DESTDIR |
 
 ### 路径参数对比
 
@@ -456,6 +670,7 @@ ORDER BY bucket;
 | pg_repack | pkglibdir=$tmp_dest/lib/postgresql | datadir=$tmp_dest/share/postgresql |
 | pgvector | pkglibdir=$tmp_dest/lib/postgresql | datadir=$tmp_dest/share/postgresql |
 | TimescaleDB | -DCMAKE_INSTALL_LIBDIR="lib/postgresql" | -DCMAKE_INSTALL_DATADIR="share/postgresql" |
+| PostGIS | 通过 configure 和 make install DESTDIR | 通过 configure 和 make install DESTDIR |
 
 ### 依赖处理对比
 
@@ -465,6 +680,7 @@ ORDER BY bucket;
 | pg_repack | PostgreSQL, libpq | 链接 PostgreSQL 源码库 |
 | pgvector | PostgreSQL | PGXS 自动检测 |
 | TimescaleDB | OpenSSL, ICU | CMake PREFIX_PATH |
+| PostGIS | GEOS, PROJ, SQLite3, CURL, protobuf, protobuf-c, LibXML2, JSON-C, PCRE2, GDAL | 编译所有依赖到 deps 目录，configure 指定路径 |
 
 ---
 
@@ -569,7 +785,8 @@ dist/host/16.15/
     ├── pg_cron-v1.6.7-pg16.x86_64.tar.gz
     ├── pg_repack-v1.5.3-pg16.x86_64.tar.gz
     ├── vector-v0.8.6-pg16.x86_64.tar.gz
-    └── timescaledb-v2.29.2-pg16.x86_64.tar.gz
+    ├── timescaledb-v2.29.2-pg16.x86_64.tar.gz
+    └── postgis-v3.6.4-pg16.x86_64.tar.gz
 ```
 
 ---
@@ -584,6 +801,7 @@ dist/host/16.15/
 | pg_repack 1.5.3 | ✅ | ✅ | ✅ |
 | pgvector 0.8.6 | ✅ | ✅ | ✅ |
 | TimescaleDB 2.29.2 | ✅ | ✅ | ✅ |
+| PostGIS 3.6.4 | ✅ | ✅ | ✅ |
 
 ### 架构支持
 
@@ -593,6 +811,60 @@ dist/host/16.15/
 | pg_repack | ✅ | ✅ | ✅ | ✅ |
 | pgvector | ✅ | ✅ | ✅ | ✅ |
 | TimescaleDB | ✅ | ✅ | ✅ | ✅ |
+| PostGIS | ✅ | ✅ | ✅ | ✅ |
+
+---
+
+## 公共库 plugin.common.sh
+
+所有插件脚本共享 `plugin.common.sh`，提供统一的基础设施：
+
+```bash
+# 引入方式 (每个插件脚本开头)
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/plugin.common.sh"
+```
+
+### 可用函数
+
+| 分类 | 函数 | 说明 |
+|------|------|------|
+| **日志** | `log_info` | 信息日志 `[INFO]` |
+| | `log_warn` | 警告日志 `[WARN]` |
+| | `log_error` | 错误日志 `[ERROR]` |
+| | `log_success` | 成功日志 `[OK]` |
+| | `log_section` | 阶段分隔线 |
+| **执行** | `run_or_die "步骤名" "日志文件" cmd...` | 执行命令，失败时打印最后 N 行日志并终止 |
+| **下载** | `download URL FILENAME CACHE_DIR` | 下载文件（带重试、超时） |
+| | `verify_file FILENAME EXPECTED_SIZE EXPECTED_SHA256` | 校验文件大小和 SHA256 |
+| | `extract_source ARCHIVE DEST_DIR` | 自动识别格式解压 |
+| **工具** | `detect_jobs` | 检测 CPU 核心数（支持 `--jobs` 覆盖） |
+| | `detect_arch` | 检测/标准化架构名 |
+| | `get_version VAR_NAME DEFAULT VERSION ARG` | 版本优先级: 参数 > 环境变量 > 默认值 |
+| **目录** | `init_plugin_dirs` | 初始化 `$build` `$tmp_dest` 等目录 |
+| | `require_pg_config` | 验证 pg_config 存在并导出变量 |
+| **打包** | `analyze_package NAME LOGFILE STRICT` | 依赖分析（ldd + RPATH） |
+| | `strip_package DEST_DIR` | strip 所有 .so 和可执行文件 |
+| | `fix_rpath BIN_DIR LIB_DIR` | 用 patchelf 修复 RPATH |
+
+### 可配置变量
+
+```bash
+# 在 source plugin.common.sh 之前设置
+LOG_TAIL_LINES=30       # 失败时打印的日志行数
+CURL_MAX_TIME=600       # 下载超时 (秒)
+```
+
+### run_or_die 用法
+
+```bash
+# run_or_die 会在命令失败时:
+# 1. 打印日志文件最后 LOG_TAIL_LINES 行
+# 2. 调用 exit 1 终止脚本
+run_or_die "编译 pg_cron" "$logfile" \
+    make -C "$src_dir" USE_PGXS=1 -j"$jobs"
+```
 
 ---
 
@@ -600,77 +872,99 @@ dist/host/16.15/
 
 ### 脚本结构
 
-每个插件脚本必须包含以下函数：
+每个插件脚本遵循统一结构：
 
 ```bash
-# 1. 插件元信息
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/plugin.common.sh"
+
+# 默认版本
+DEFAULT_XXX_VERSION="x.y.z"
+
+# 插件元信息 (info 模式输出 JSON)
 plugin_info() {
+    local plugin_version="${1:-$DEFAULT_XXX_VERSION}"
     cat << EOF
 {
   "name": "插件名",
-  "version": "版本号",
+  "version": "${plugin_version}",
   "preload": true/false,
   "config": {},
+  "init_sql": "自定义初始化SQL（可选，无则省略）",
   "description": "插件描述"
 }
 EOF
 }
 
-# 2. 使用说明
-show_usage() {
-    echo "用法: $0 {info|build} [参数...]"
+# 使用说明
+show_usage() { ... }
+
+# 编译函数
+build_xxx() {
+    local src_dir="$1" logfile="$2" jobs="$3"
+    # run_or_die 包裹每个 make/cmake 命令
 }
 
-# 3. 版本获取
-get_version() {
-    # 优先级: 参数 > 环境变量 > 默认值
+# 打包函数
+package_xxx() {
+    local src_dir="$1" logfile="$2" jobs="$3"
+    # analyze_package + strip_package 自动执行
 }
 
-# 4. 下载函数
-download() {
-    # 缓存检查 + 下载
+# 主流程
+main() {
+    local action="$1"; shift
+    case "$action" in
+        info)    plugin_info "$@" ;;
+        build)   parse_args ...; build_xxx ...; package_xxx ... ;;
+        *)       show_usage; exit 1 ;;
+    esac
 }
 
-# 5. 编译函数
-build_插件名() {
-    # 解压源码 → 配置 → 编译
-}
-
-# 6. 打包函数
-package_插件名() {
-    # 安装到临时目录 → 打包 → 依赖分析
-}
+main "$@"
 ```
 
 ### 目录变量
 
 ```bash
-basedir=$(dirname $(readlink -f $0))
-deps="$basedir/deps/$triple"
-dist="$basedir/dist/$triple/$version/pgsql"
-build="$basedir/build/$triple/$version/插件名_v版本"
-cache="$basedir/cache"
-plugins_dir="$basedir/dist/$triple/$version/plugins"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"  # 脚本所在目录
+basedir="$SCRIPT_DIR"
+deps="$basedir/deps/$triple"                # 依赖库 (动态 .so)
+dist="$basedir/dist/$triple/$pg_ver/pgsql"  # PostgreSQL 安装目录
+build="$basedir/build/$triple/$pg_ver/插件名_v版本"  # 编译工作目录
+cache="$basedir/cache"                      # 源码包缓存
+plugins_dir="$basedir/dist/$triple/$pg_ver/plugins"  # 插件包输出
+tmp_dest="$build/插件名"                    # 临时安装目录
+logfile="$build/插件名.log"                 # 编译日志
 ```
 
-### 日志函数
+### 命令行选项
+
+所有插件脚本支持：
 
 ```bash
-log_with_time() {
-    echo "[$(date +%H:%M:%S.%03N)] $1" >&2
-}
+./plugin.xxx.sh build <triple> <PG版本> [插件版本] [选项]
+
+选项:
+  --jobs <n>      并行编译数 (默认: CPU核心数)
+  --no-strict     依赖分析只报告不失败 (默认严格模式)
 ```
 
 ### 依赖分析
 
-打包完成后，自动执行依赖分析：
+打包完成后自动执行：
 
 ```bash
-# 检查 .so 文件依赖
-ldd plugin.so
+# 分析 .so 文件依赖
+analyze_package "插件名" "$logfile" "$strict"
 
-# 检查 RPATH/RUNPATH
-readelf -d plugin.so | grep -E "RPATH|RUNPATH"
+# 内部执行:
+# 1. ldd 检查未满足的依赖
+# 2. readelf 检查 RPATH/RUNPATH
+# 3. 严格模式下发现外部依赖则失败
 ```
 
 ---
@@ -729,3 +1023,4 @@ psql -c "CREATE EXTENSION pg_cron;"
 - [pg_repack GitHub](https://github.com/reorg/pg_repack)
 - [pgvector GitHub](https://github.com/pgvector/pgvector)
 - [TimescaleDB 文档](https://docs.timescale.com/timescaledb/latest/)
+- [PostGIS 文档](https://postgis.net/documentation/)

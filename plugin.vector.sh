@@ -1,25 +1,29 @@
 #!/bin/bash
+# ==========================================================
+# plugin.vector.sh - pgvector 插件编译脚本
+# ==========================================================
+# 目录结构:
+#   deps/   - 编译依赖库 (openssl, zlib, icu, ncurses, libedit)
+#   dist/   - 最终产物目录 (PostgreSQL + 插件)，只读
+#   build/  - 编译工作目录，每次清理重建
+#   cache/  - 源代码包缓存，避免重复下载
+#
+# 依赖 plugin.common.sh:
+#   log_info / log_warn / log_error / log_success / log_section
+#   run_or_die / verify_file / download / extract_source
+#   detect_jobs / detect_arch / get_version
+#   init_plugin_dirs / require_pg_config
+#   analyze_dir / strip_package
+#
+# 打包流程: 下载 → 编译 → 安装 → strip → 依赖分析 → 打包
+# ==========================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/plugin.common.sh"
 
 # ==========================================================
-# ������ 目录结构说明
-# ==========================================================
-# deps/   - 编译依赖库 (openssl, zlib, icu, ncurses, libedit)
-#          重要性: vector 需要这些库的头文件和静态库
-#
-# dist/   - 最终产物目录 (PostgreSQL + 插件)
-#          重要性: 包含已编译的 PostgreSQL，提供 pg_config 和头文件
-#          注意: 只读，不写入，仅用于获取编译参数
-#
-# build/  - 编译工作目录
-#          重要性: 存放 vector 源代码和编译中间文件
-#          每次编译会清理重建
-#
-# cache/  - 源代码包缓存
-#          重要性: 避免重复下载，加速编译
-# ==========================================================
-
-# ==========================================================
-# 默认版本 (可通过参数覆盖)
+# 默认版本 (可通过参数或环境变量覆盖)
 # ==========================================================
 DEFAULT_VECTOR_VERSION="0.8.6"
 
@@ -28,7 +32,7 @@ DEFAULT_VECTOR_VERSION="0.8.6"
 # ==========================================================
 plugin_info() {
     local plugin_version="${1:-$DEFAULT_VECTOR_VERSION}"
-    
+
     cat << EOF
 {
   "name": "vector",
@@ -44,49 +48,42 @@ EOF
 # 使用说明
 # ==========================================================
 show_usage() {
-    echo "用法: $0 {info|build} [参数...]"
-    echo ""
-    echo "模式:"
-    echo "  info [版本]                - 返回插件元信息 (JSON格式)"
-    echo "  build <triple> <PG版本> [插件版本]  - 编译打包插件"
-    echo ""
-    echo "示例:"
-    echo "  $0 info                    # 使用默认版本 ${DEFAULT_VECTOR_VERSION}"
-    echo "  $0 info 0.7.4              # 指定版本 0.7.4"
-    echo "  $0 build host 16.15        # 使用默认版本 ${DEFAULT_VECTOR_VERSION}"
-    echo "  $0 build host 16.15 0.7.4  # 指定版本 0.7.4"
-    echo "  $0 build x86_64-linux-gnu 16.15  # 交叉编译 x86_64"
-    echo "  $0 build aarch64-linux-gnu 16.15 # 交叉编译 ARM64"
-}
+    cat << EOF
+用法: $0 {info|build} [参数...]
 
-# ==========================================================
-# 获取版本号 (优先级: 参数 > 环境变量 > 默认值)
-# ==========================================================
-get_version() {
-    local version="${1:-}"
-    if [ -n "$version" ]; then
-        echo "$version"
-    elif [ -n "$VECTOR_VERSION" ]; then
-        echo "$VECTOR_VERSION"
-    else
-        echo "$DEFAULT_VECTOR_VERSION"
-    fi
+模式:
+  info [版本]                        - 返回插件元信息 (JSON格式)
+  build <triple> <PG版本> [插件版本] [选项]  - 编译打包插件
+
+选项:
+  --jobs <n>                         - 并行编译数 (默认: CPU核心数)
+  --no-strict                        - 依赖分析只报告不失败 (默认严格)
+
+示例:
+  $0 info                            # 使用默认版本 ${DEFAULT_VECTOR_VERSION}
+  $0 info 0.7.4                      # 指定版本 0.7.4
+  $0 build host 16.15                # 使用默认版本 ${DEFAULT_VECTOR_VERSION}
+  $0 build host 16.15 0.7.4          # 指定版本 0.7.4
+  $0 build host 16.15 --jobs 8       # 指定并行数
+  $0 build x86_64-linux-gnu 16.15    # 交叉编译 x86_64
+  $0 build aarch64-linux-gnu 16.15   # 交叉编译 ARM64
+EOF
 }
 
 # ==========================================================
 # 主入口: 模式分发
 # ==========================================================
-if [ "$1" == "info" ]; then
+if [ "${1:-}" == "info" ]; then
     shift
-    plugin_version=$(get_version "$1")
+    plugin_version=$(get_version "${1:-}" "VECTOR_VERSION" "$DEFAULT_VECTOR_VERSION")
     plugin_info "$plugin_version"
     exit 0
 fi
 
-if [ "$1" == "build" ]; then
+if [ "${1:-}" == "build" ]; then
     shift
 else
-    if [ "$1" == "" ] || [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
+    if [ "${1:-}" == "" ] || [ "${1:-}" == "-h" ] || [ "${1:-}" == "--help" ]; then
         show_usage
         exit 1
     fi
@@ -95,118 +92,95 @@ fi
 # ==========================================================
 # build 模式: 参数解析
 # ==========================================================
-if [ "$1" == "" ] || [ "$2" == "" ]; then
-    echo "错误: build 模式需要 <triple> 和 <PG版本>"
-    echo ""
+if [ "${1:-}" == "" ] || [ "${2:-}" == "" ]; then
+    echo "错误: build 模式需要 <triple> 和 <PG版本>" >&2
+    echo "" >&2
     show_usage
     exit 1
 fi
 
 triple=$1
 version=$2
-vector_version=$(get_version "$3")
+shift 2
 
-numcpus=$(nproc --all)
+# 可选插件版本 (三段式 x.y.z)
+if [[ "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    vector_version="$1"
+    shift
+else
+    vector_version=$(get_version "" "VECTOR_VERSION" "$DEFAULT_VECTOR_VERSION")
+fi
+
+# 其余选项
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --jobs)
+            if [ -z "${2:-}" ]; then
+                echo "错误: --jobs 需要一个参数" >&2
+                exit 1
+            fi
+            JOBS="$2"
+            shift 2
+            ;;
+        --no-strict)
+            ANALYZE_STRICT=0
+            shift
+            ;;
+        *)
+            echo "错误: 未知选项: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+jobs=$(detect_jobs)
 
 # ==========================================================
 # 架构映射
 # ==========================================================
-case $triple in
-    x86_64-*linux*)
-        arch=x86_64
-        ;;
-    aarch64-*linux*)
-        arch=aarch64
-        ;;
-    s390x-*linux*)
-        arch=s390x
-        ;;
-    arm-*linux*)
-        arch=armv7l
-        ;;
-    host)
-        arch=$(uname -m)
-        ;;
-    *)
-        echo "错误: 不支持的目标平台: $triple"
-        exit 1
-        ;;
-esac
+arch=$(detect_arch "$triple") || {
+    echo "错误: 不支持的目标平台: $triple" >&2
+    exit 1
+}
 
-basedir=$(dirname $(readlink -f $0))
+# ==========================================================
+# 目录初始化 + PostgreSQL 检查
+# ==========================================================
+init_plugin_dirs "$SCRIPT_DIR" "$triple" "$version"
+require_pg_config "$triple"
 
 vector_tar="vector-${vector_version}.tar.gz"
 
-deps="$basedir/deps/$triple"
-dist="$basedir/dist/$triple/$version/pgsql"
-build="$basedir/build/$triple/$version/vector_v${vector_version}"
-cache="$basedir/cache"
-plugins_dir="$basedir/dist/$triple/$version/plugins"
-
-mkdir -p "$build" "$cache" "$plugins_dir"
-
-if [ ! -f "$dist/bin/pg_config" ]; then
-    echo "错误: 找不到 pg_config: $dist/bin/pg_config"
-    echo "请先为 $triple 编译安装 PostgreSQL"
-    exit 1
-fi
-
-log_with_time() {
-    echo "[$(date +%H:%M:%S.%03N)] $1" >&2
-}
-
 # ==========================================================
-# 通用下载函数
-# ==========================================================
-download() {
-    if [ -f "$cache/$1" ]; then
-        log_with_time "缓存命中: $1"
-    else
-        log_with_time "下载中: $1"
-        log_with_time "目标 URL: $2"
-        if ! curl -L -o "$cache/$1" "$2" --connect-timeout 60 --max-time 300 --retry 3 --retry-delay 2 --progress-bar; then
-            log_with_time "下载失败: $1!"
-            exit 1
-        fi
-        log_with_time "下载完成: $1"
-    fi
-}
-
-# ==========================================================
-# 下载 vector 源代码包
+# 下载 pgvector 源代码包
 # ==========================================================
 download_vector() {
-    download "$vector_tar" "https://github.com/pgvector/pgvector/archive/refs/tags/v${vector_version}.tar.gz"
+    download "$vector_tar" \
+        "https://github.com/pgvector/pgvector/archive/refs/tags/v${vector_version}.tar.gz"
 }
 
 # ==========================================================
-# 编译 vector
+# 解析 PostgreSQL 编译环境 (PG_CONFIG / PGXS / 头文件路径)
 # ==========================================================
-build_vector() {
-    log="$build/vector.log"
-    rm -f "$log"
-    
-    cd "$basedir/build/$triple/$version"
-    rm -rf "vector_v${vector_version}"
-    mkdir -p "vector_v${vector_version}"
-    tar xf "$cache/$vector_tar" -C "vector_v${vector_version}" --strip-components 1
-    cd "vector_v${vector_version}"
+# 导出: PG_CONFIG_BIN PGXS_FILE PG_CPPFLAGS
+resolve_pg_env() {
+    PG_CONFIG_BIN="$DIST_DIR/bin/pg_config"
 
-    log_with_time "配置编译环境: vector v${vector_version}"
-    log_with_time "   构建目录: $(pwd)"
-    
-    PG_CONFIG_BIN="$dist/bin/pg_config"
-    
-    PG_INCLUDE="$dist/include"
-    PG_SERVER_INCLUDE="$dist/include/postgresql/server"
-    
-    PGXS_FILE=$(find "$dist" -name "pgxs.mk" 2>/dev/null | head -1)
-    if [ -z "$PGXS_FILE" ]; then
-        log_with_time "错误: 找不到 pgxs.mk"
+    if [ ! -x "$PG_CONFIG_BIN" ]; then
+        log_error "pg_config 不可执行: $PG_CONFIG_BIN"
         exit 1
     fi
-    
-    export PATH="$dist/bin:$PATH"
+
+    local pg_include="$DIST_DIR/include"
+    local pg_server_include="$DIST_DIR/include/postgresql/server"
+
+    PGXS_FILE=$(find "$DIST_DIR" -name "pgxs.mk" 2>/dev/null | head -1)
+    if [ -z "$PGXS_FILE" ]; then
+        log_error "找不到 pgxs.mk (在 $DIST_DIR 下)"
+        exit 1
+    fi
+
+    export PATH="$DIST_DIR/bin:$PATH"
 
     if [ "$triple" != "host" ]; then
         export CC="$triple-gcc"
@@ -216,144 +190,161 @@ build_vector() {
         export STRIP="strip"
     fi
 
-    log_with_time "   PG_CONFIG: $PG_CONFIG_BIN"
-    log_with_time "   PGXS:      $PGXS_FILE"
-
-    PG_CPPFLAGS="-I$PG_INCLUDE -I$PG_SERVER_INCLUDE"
-    
-    if [ -d "$deps/usr/include" ]; then
-        PG_CPPFLAGS="$PG_CPPFLAGS -I$deps/usr/include"
+    PG_CPPFLAGS="-I$pg_include -I$pg_server_include"
+    if [ -d "$DEPS_DIR/usr/include" ]; then
+        PG_CPPFLAGS="$PG_CPPFLAGS -I$DEPS_DIR/usr/include"
     fi
 
-    log_with_time "   PG_CPPFLAGS: $PG_CPPFLAGS"
-
-    log_with_time "编译中: vector v${vector_version}"
-    
-    if ! make USE_PGXS=1 \
-            PG_CONFIG="$PG_CONFIG_BIN" \
-            PGXS="$PGXS_FILE" \
-            PG_CPPFLAGS="$PG_CPPFLAGS" \
-            -j$numcpus >>"$log" 2>>"$log"; then
-        log_with_time "编译失败!"
-        cat "$log" | tail -60
-        exit 1
-    fi
-
-    log_with_time "✅ 编译成功!"
-    
-    echo "$(pwd)"
+    log_info "   PG_CONFIG:   $PG_CONFIG_BIN"
+    log_info "   PGXS:        $PGXS_FILE"
+    log_info "   PG_CPPFLAGS: $PG_CPPFLAGS"
 }
 
 # ==========================================================
-# 打包 vector
+# 编译 pgvector
 # ==========================================================
+build_vector() {
+    local log="$BUILD_DIR/vector.log"
+    : >"$log"
+
+    log_section "编译 vector v${vector_version}"
+
+    local src_dir="$BUILD_DIR/vector_v${vector_version}"
+    rm -rf "$src_dir"
+
+    extract_source "$CACHE_DIR/$vector_tar" "$src_dir" 1 \
+        || { log_error "vector 解压失败!"; exit 1; }
+
+    cd "$src_dir"
+    log_info "构建目录: $(pwd)"
+
+    resolve_pg_env
+
+    log_info "编译中: vector v${vector_version}"
+
+    run_or_die "vector make" "$log" \
+        make USE_PGXS=1 \
+            PG_CONFIG="$PG_CONFIG_BIN" \
+            PGXS="$PGXS_FILE" \
+            PG_CPPFLAGS="$PG_CPPFLAGS" \
+            -j"$jobs"
+
+    log_success "vector 编译成功!"
+}
+
+# ==========================================================
+# 打包 pgvector
+# ==========================================================
+# 流程: make install → strip → 依赖分析 → 打包
 package_vector() {
-    local build_dir="$1"
-    
-    if [ -z "$build_dir" ] || [ ! -d "$build_dir" ]; then
-        log_with_time "错误: 构建目录不存在: $build_dir"
-        exit 1
-    fi
-    
-    cd "$build_dir"
-
-    PG_CONFIG_BIN="$dist/bin/pg_config"
-    PGXS_FILE=$(find "$dist" -name "pgxs.mk" 2>/dev/null | head -1)
-
+    local pg_major
     pg_major=$(echo "$version" | cut -d. -f1)
-    pkg_name="vector-v${vector_version}-pg${pg_major}.${arch}.tar.gz"
-    pkg_path="$plugins_dir/$pkg_name"
-    
-    log_with_time "打包中: $pkg_path"
 
-    tmp_dest="$build/tmp_install"
+    local pkg_name="vector-v${vector_version}-pg${pg_major}.${arch}.tar.gz"
+    local pkg_path="$PLUGINS_DIR/$pkg_name"
+
+    log_section "打包 vector"
+    log_info "目标: $pkg_path"
+
+    resolve_pg_env
+
+    # ------------------------------------------------------
+    # 1. 安装到临时目录 (PGXS 标准布局)
+    # ------------------------------------------------------
+    local tmp_dest="$BUILD_DIR/tmp_install"
     rm -rf "$tmp_dest"
     mkdir -p "$tmp_dest"
 
-    if ! make USE_PGXS=1 \
+    log_info "安装中..."
+
+    run_or_die "vector install" "$BUILD_DIR/vector.log" \
+        make USE_PGXS=1 \
             PG_CONFIG="$PG_CONFIG_BIN" \
             PGXS="$PGXS_FILE" \
             bindir="$tmp_dest/bin" \
             pkglibdir="$tmp_dest/lib/postgresql" \
             datadir="$tmp_dest/share/postgresql" \
             sharedir="$tmp_dest/share/postgresql" \
-            includedir_server="$tmp_dest/postgresql/include/server" \
-            install >>"$build/vector.log" 2>>"$build/vector.log"; then
-        log_with_time "安装失败!"
-        cat "$build/vector.log" | tail -50
+            includedir_server="$tmp_dest/include/postgresql/server" \
+            install
+
+    if [ ! -d "$tmp_dest" ] || [ -z "$(ls -A "$tmp_dest" 2>/dev/null)" ]; then
+        log_error "安装目录为空: $tmp_dest"
         exit 1
     fi
 
+    # ------------------------------------------------------
+    # 2. strip 瘦身 (仅 .so)
+    # ------------------------------------------------------
+    if command -v strip >/dev/null 2>&1; then
+        local so_count=0
+        so_count=$(find "$tmp_dest/lib" -name "*.so*" -type f 2>/dev/null | wc -l)
+        if [ "$so_count" -gt 0 ]; then
+            log_info "strip 瘦身中 ($so_count 个 .so)..."
+            find "$tmp_dest/lib" -name "*.so*" -type f \
+                -exec strip --strip-unneeded {} \; 2>/dev/null || true
+        fi
+    else
+        log_warn "strip 未找到，跳过瘦身"
+    fi
+
+    # ------------------------------------------------------
+    # 3. 依赖分析 (打包之前, 严格模式)
+    # ------------------------------------------------------
+
+    # RPATH 修复
+    fix_rpath "$tmp_dest" "lib/postgresql"
+
+	log_info "依赖分析中..."
+    if ! analyze_dir "$tmp_dest"; then
+        log_error "依赖分析失败，放弃打包"
+        exit 1
+    fi
+
+    # ------------------------------------------------------
+    # 4. 进入安装目录打包
+    # ------------------------------------------------------
     cd "$tmp_dest"
 
-    TAR_DIRS=""
-    [ -d "lib" ] && TAR_DIRS="$TAR_DIRS lib"
-    [ -d "share" ] && TAR_DIRS="$TAR_DIRS share"
-    [ -d "bin" ] && TAR_DIRS="$TAR_DIRS bin"
-    [ -d "include" ] && TAR_DIRS="$TAR_DIRS include"
+    local dirs=()
+    for d in lib share bin include; do
+        [ -d "$d" ] && dirs+=("$d")
+    done
 
-    if [ -z "$TAR_DIRS" ]; then
-        log_with_time "错误: 没有可打包的目录 (lib/share/bin/include 均不存在)"
+    if [ ${#dirs[@]} -eq 0 ]; then
+        log_error "没有可打包的目录 (lib/share/bin/include 均不存在)"
         exit 1
     fi
 
-    tar -czf "$pkg_path" $TAR_DIRS 2>/dev/null
+    log_info "打包目录: ${dirs[*]}"
 
-    log_with_time "依赖分析中..."
-    
-    tmp_check="$build/pkg_check"
-    rm -rf "$tmp_check"
-    mkdir -p "$tmp_check"
-    tar -xzf "$pkg_path" -C "$tmp_check"
-    
-    echo ""
-    echo "=========================================="
-    echo "������ 依赖检查:"
-    echo "=========================================="
-    
-    find "$tmp_check" -name "*.so" -type f 2>/dev/null | while read -r so; do
-        rel_path="${so#$tmp_check/}"
-        echo ""
-        echo "������ $rel_path 依赖:"
-        ldd "$so" 2>/dev/null | grep -E "=>|not found" || echo "   (无动态依赖或非 ELF 文件)"
-    done
-    
-    if [ -d "$tmp_check/bin" ]; then
-        find "$tmp_check/bin" -type f -executable 2>/dev/null | while read -r bin; do
-            rel_path="${bin#$tmp_check/}"
-            echo ""
-            echo "������ $rel_path 依赖:"
-            ldd "$bin" 2>/dev/null | grep -E "=>|not found" || echo "   (无动态依赖或非 ELF 文件)"
-            echo ""
-            echo "������ $rel_path RPATH/RUNPATH:"
-            readelf -d "$bin" 2>/dev/null | grep -E "RPATH|RUNPATH" || echo "   (未设置 RPATH/RUNPATH)"
-        done
-    fi
-    
-    rm -rf "$tmp_check"
-    
-    echo ""
-    echo "=========================================="
+    tar -czf "$pkg_path" "${dirs[@]}"
 
-    log_with_time "✅ 打包完成: $pkg_path"
+    log_success "打包完成: $pkg_path"
     ls -lh "$pkg_path"
-    
-    echo ""
-    echo "=========================================="
-    echo "完成! vector v${vector_version} 已打包"
-    echo "   包路径: $pkg_path"
-    echo "   包内容:"
-    tar -tzf "$pkg_path"
-    echo "=========================================="
+
+    # ------------------------------------------------------
+    # 5. 完成信息
+    # ------------------------------------------------------
+    echo "" >&2
+    echo "==========================================" >&2
+    echo "完成! vector v${vector_version} 已打包" >&2
+    echo "   包路径: $pkg_path" >&2
+    echo "   包大小: $(du -h "$pkg_path" | cut -f1)" >&2
+    echo "   包内容:" >&2
+    tar -tzf "$pkg_path" >&2
+    echo "==========================================" >&2
 }
 
 # ==========================================================
 # build 模式: 主流程
 # ==========================================================
-log_with_time "开始构建 vector v${vector_version} (目标: $triple, PG: $version)"
+log_section "开始构建 vector v${vector_version} (目标: $triple, PG: $version)"
+log_info "并行编译数: $jobs"
+log_info "依赖分析严格模式: ${ANALYZE_STRICT:-1}"
 
 download_vector
 
-build_dir=$(build_vector)
+build_vector
 
-package_vector "$build_dir"
+package_vector

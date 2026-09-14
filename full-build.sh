@@ -134,6 +134,33 @@ get_plugin_configs() {
 }
 
 # ==========================================================
+# 获取插件的自定义初始化 SQL (init_sql 字段)
+# 参数:
+#   $1 - 插件名称
+# 返回:
+#   自定义 SQL 字符串 (如果存在)
+#   空字符串 (如果没有)
+# ==========================================================
+get_plugin_init_sql() {
+    local plugin_name="$1"
+    local info=$(get_plugin_info "$plugin_name")
+    
+    if [ -z "$info" ]; then
+        echo ""
+        return 1
+    fi
+    
+    # 用 sed 从 JSON 中提取 init_sql 字段的值
+    # 支持转义和特殊字符
+    local init_sql=$(echo "$info" | \
+        tr '\n' ' ' | \
+        sed -n 's/.*"init_sql": *"\([^"]*\)".*/\1/p' | \
+        head -1)
+    
+    echo "$init_sql"
+}
+
+# ==========================================================
 # 发现所有可用插件
 # ==========================================================
 discover_plugins() {
@@ -141,6 +168,8 @@ discover_plugins() {
     for script in "${basedir}"/plugin.*.sh; do
         if [ -f "$script" ]; then
             local name=$(basename "$script" .sh | sed 's/^plugin\.//')
+            # 排除公共库
+            [ "$name" = "common" ] && continue
             if get_plugin_info "$name" &>/dev/null; then
                 plugins+=("$name")
             else
@@ -559,7 +588,22 @@ MANIFEST_EOF
 -- ==========================================================
 
 $(for plugin_name in "${PLUGINS_TO_BUILD[@]}"; do
-    echo "CREATE EXTENSION IF NOT EXISTS ${plugin_name};"
+    # 先尝试获取自定义 init_sql
+    local custom_sql=$(get_plugin_init_sql "$plugin_name")
+    
+    if [ -n "$custom_sql" ]; then
+        # 有自定义 SQL：按分号拆分，每行一条
+        echo ""
+        echo "-- ===== $plugin_name (自定义) ====="
+        echo "$custom_sql" | tr ';' '\n' | grep -v '^\s*$' | sed 's/^\s*//;s/\s*$//' | while read -r stmt; do
+            [ -n "$stmt" ] && echo "$stmt;"
+        done
+    else
+        # 默认：单条 CREATE EXTENSION
+        echo ""
+        echo "-- ===== $plugin_name ====="
+        echo "CREATE EXTENSION IF NOT EXISTS ${plugin_name};"
+    fi
 done)
 
 -- 验证扩展
