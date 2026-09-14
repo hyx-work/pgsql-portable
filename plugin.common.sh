@@ -422,7 +422,7 @@ strip_package() {
 }
 
 # ==========================================================
-# RPATH 修复 (可选, 需要 patchelf)
+# RPATH 修复 (需要 patchelf)
 # ==========================================================
 # 用法: fix_rpath <pack_dir> <lib_subdir>
 #   lib_subdir: PostGIS 这类扩展用 "lib/postgresql"; 无子目录传 "lib"
@@ -431,8 +431,9 @@ fix_rpath() {
     local lib_subdir="${2:-lib}"
 
     if ! command -v patchelf >/dev/null 2>&1; then
-        log_warn "patchelf 未找到，跳过 RPATH 修复"
-        return 0
+        log_error "patchelf 未找到，RPATH 修复是必需步骤"
+        log_error "请先安装 patchelf: 见 tool/README.md"
+        exit 1
     fi
 
     log_info "修复 RPATH..."

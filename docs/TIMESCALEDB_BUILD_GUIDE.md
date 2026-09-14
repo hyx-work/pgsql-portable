@@ -18,7 +18,7 @@ TimescaleDB 是一个开源的时间序列数据库，作为 PostgreSQL 扩展�
 | **GCC/G++** | 支持 C++17 | 编译器 |
 | **PostgreSQL** | 已编译 | 提供 pg_config 和头文件 |
 | **OpenSSL** | - | 加密通信支持 |
-| **patchelf** | - | 修复 RPATH（可选，未安装时跳过） |
+| **patchelf** | - | 修复 RPATH（必需） |
 | **plugin.common.sh** | - | 公共库（自动 source，无需手动引入） |
 
 ### CentOS 7 安装 CMake

@@ -26,7 +26,7 @@ pgvector 是 PostgreSQL 的向量相似度搜索扩展，支持 IVFFlat 和 HNSW
 | GCC | C 编译器 |
 | make | 构建工具 |
 | OpenMP | 可选，用于并行索引构建 |
-| patchelf | 修复 RPATH（可选，未安装时跳过） |
+| patchelf | 修复 RPATH（必需） |
 | plugin.common.sh | 公共库（自动 source，无需手动引入） |
 
 ---

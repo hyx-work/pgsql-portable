@@ -26,7 +26,7 @@ pg_repack 是 PostgreSQL 的在线表重组工具，可以在不锁表的情况�
 | PostgreSQL 源码 | 提供 libpgcommon.a、libpgport.a |
 | GCC | C 编译器 |
 | make | 构建工具 |
-| patchelf | 修复 RPATH（可选，未安装时跳过） |
+| patchelf | 修复 RPATH（必需） |
 | plugin.common.sh | 公共库（自动 source，无需手动引入） |
 
 ---

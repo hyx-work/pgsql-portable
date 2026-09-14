@@ -25,7 +25,7 @@ pg_cron 是 PostgreSQL 的定时任务调度器，类似于 Linux 的 cron，可
 | PostgreSQL | 已编译，提供 pg_config 和头文件 |
 | GCC | C 编译器 |
 | make | 构建工具 |
-| patchelf | 修复 RPATH（可选，未安装时跳过） |
+| patchelf | 修复 RPATH（必需） |
 | plugin.common.sh | 公共库（自动 source，无需手动引入） |
 
 ---
