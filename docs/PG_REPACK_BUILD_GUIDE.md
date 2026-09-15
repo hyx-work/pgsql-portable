@@ -111,12 +111,12 @@ pgsql-portable/
 ```bash
 # 脚本内部执行 (resolve_pg_env → require_pg_source → run_or_die)
 # 依赖: libpgcommon.a, libpgport.a, libpq
-# RPATH: $ORIGIN/../lib (便携包 lib/ 下的 libpq)
+# RPATH: $ORIGIN/../lib (便携包 lib/ 下的 libpq) - 通过 fix_rpath 修复
 make -C bin USE_PGXS=1 \
     PG_CONFIG="$PG_CONFIG_BIN" \
     PGXS="$PGXS_FILE" \
     PG_CPPFLAGS="$PG_CPPFLAGS" \
-    LDFLAGS="-L$pg_src/src/common -L$pg_src/src/port -L$DIST_DIR/lib -Wl,-rpath=\$\$ORIGIN/../lib" \
+    LDFLAGS="-L$pg_src/src/common -L$pg_src/src/port" \
     -j"$jobs"
 ```
 
@@ -152,7 +152,7 @@ RPATH: fix_rpath 修复 bin/ 和 lib/ 的 RPATH
 | `-C bin` | - | 只编译 bin 目录 |
 | `USE_PGXS` | `1` | 使用 PGXS |
 | `PG_CPPFLAGS` | `-I$PG_INCLUDE -I$PG_INTERNAL_INCLUDE -I$PG_SERVER_INCLUDE` | 头文件路径 |
-| `LDFLAGS` | `-L$pg_src/src/common -L$pg_src/src/port -L$DIST_DIR/lib -Wl,-rpath=\$\$ORIGIN/../lib` | 链接 + RPATH |
+| `LDFLAGS` | `-L$pg_src/src/common -L$pg_src/src/port` | 链接 PostgreSQL 源码库 |
 
 ### 扩展编译参数
 
@@ -199,11 +199,12 @@ pg_repack 包含客户端工具和扩展库两部分，RPATH 分别处理：
 
 ### bin/ 客户端工具
 
-编译时通过 LDFLAGS 设置 RPATH：
+打包阶段通过 `fix_rpath` 自动修复：
 
 ```bash
-LDFLAGS="-L$PG_SRC/src/common -L$PG_SRC/src/port -L$DIST_DIR/lib -Wl,-rpath=\$\$ORIGIN/../lib"
-# $$ORIGIN/../lib → 指向便携包 lib/ 目录下的 libpq
+fix_rpath "$tmp_dest" "bin"
+# → patchelf --set-rpath '$ORIGIN/../lib'
+# → 指向便携包 lib/ 目录下的 libpq
 ```
 
 ### lib/postgresql/ 扩展库
@@ -298,13 +299,8 @@ ls build/host/16.15/postgresql/src/port/libpgport.a
 ### 2. RPATH 未设置
 
 **问题**：运行 pg_repack 时找不到 libpq
-```bash
-# 检查 RPATH
-readelf -d pg_repack | grep RPATH
 
-# 如果没有设置，重新编译
-make -C bin LDFLAGS="-Wl,-rpath=\$\$ORIGIN/../lib" ...
-```
+**解决**：打包时通过 fix_rpath 自动修复 RPATH
 
 ### 3. 权限不足
 

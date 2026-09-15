@@ -51,7 +51,7 @@ pgsql-portable/
 │           ├── timescaledb_v2.29.2/
 │           └── postgis_v3.6.4/
 ├── deps/
-│   └── host/usr/                   # 静态依赖库
+│   └── host/usr/                   # 依赖库 (动态 .so)
 ├── dist/
 │   └── host/
 │       └── 16.15/
@@ -220,7 +220,7 @@ make -C bin USE_PGXS=1 \
     PG_CONFIG="$PG_CONFIG_BIN" \
     PGXS="$PGXS_FILE" \
     PG_CPPFLAGS="$PG_CPPFLAGS" \
-    LDFLAGS="-L$pg_src/src/common -L$pg_src/src/port -L$dist/lib -Wl,-rpath=\$\$ORIGIN/../lib" \
+    LDFLAGS="-L$pg_src/src/common -L$pg_src/src/port" \
     -j$numcpus
 
 # 编译扩展（lib/）
@@ -494,36 +494,39 @@ PostGIS 的依赖需要编译到 `deps/` 目录：
 ```bash
 # SQLite3 (PROJ 依赖)
 cd sqlite-autoconf-3440000
-./configure --prefix=/usr --disable-shared --enable-static --disable-readline
+./configure --prefix=/usr --enable-shared --disable-static --disable-readline
 make -j$(nproc) && make DESTDIR="$deps" install
 
 # CURL (PROJ 依赖)
 cd curl-8.4.0
-./configure --prefix=/usr --disable-shared --enable-static --without-ssl --without-zlib
+./configure --prefix=/usr --enable-shared --disable-static --without-ssl --without-zlib
 make -j$(nproc) && make DESTDIR="$deps" install
-
-# GEOS (几何引擎)
-cd geos-3.14.1
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF
-cmake --build build -j$(nproc) && env DESTDIR="$deps" cmake --install build
-
-# PROJ (坐标转换，依赖 SQLite3 + CURL)
-cd proj-8.2.1
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_SHARED_LIBS=OFF \
-    -DSQLITE3_INCLUDE_DIR="$deps/usr/include" -DSQLITE3_LIBRARY="$deps/usr/lib/libsqlite3.a" \
-    -DCURL_INCLUDE_DIR="$deps/usr/include" -DCURL_LIBRARY="$deps/usr/lib/libcurl.a"
-cmake --build build -j$(nproc) && env DESTDIR="$deps" cmake --install build
 
 # protobuf (protobuf-c 依赖)
 cd protobuf-3.20.3
-./configure --prefix=/usr --disable-shared --enable-static
+./configure --prefix=/usr --enable-shared --disable-static
 make -j$(nproc) && make DESTDIR="$deps" install
 
 # protobuf-c (MVT 矢量切片支持)
 cd protobuf-c-1.4.1
 export PATH="$deps/usr/bin:$PATH" PROTOC="$deps/usr/bin/protoc"
-./configure --prefix=/usr --disable-shared --enable-static LDFLAGS="-L$deps/usr/lib -static-libtool-libs"
+./configure --prefix=/usr --enable-shared --disable-static PROTOC="$deps/usr/bin/protoc"
 make -j$(nproc) && make DESTDIR="$deps" install
+
+# PROJ (坐标转换，依赖 SQLite3 + CURL)
+cd proj-8.2.1
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
+    -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_RPATH='$ORIGIN' -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+    -DSQLITE3_INCLUDE_DIR="$deps/usr/include" -DSQLITE3_LIBRARY="$deps/usr/lib/libsqlite3.so" \
+    -DCURL_INCLUDE_DIR="$deps/usr/include" -DCURL_LIBRARY="$deps/usr/lib/libcurl.so"
+cmake --build build -j$(nproc) && env DESTDIR="$deps" cmake --install build
+
+# GEOS (几何引擎)
+cd geos-3.14.1
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
+    -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_RPATH='$ORIGIN' -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+    -DBUILD_TESTING=OFF
+cmake --build build -j$(nproc) && env DESTDIR="$deps" cmake --install build
 ```
 
 ### Configure 参数
@@ -531,13 +534,15 @@ make -j$(nproc) && make DESTDIR="$deps" install
 ```bash
 ./configure \
     --prefix=/usr \
-    --with-pgconfig=$PG_CONFIG_BIN \
-    --with-geosconfig=$deps/usr/bin/geos-config \
-    --with-projdir=$deps/usr \
-    --with-xml2config=$deps/usr/bin/xml2-config \
-    --with-json-c=$deps/usr \
-    --with-protobuf-c=$deps/usr \
-    --with-pcre-dir=$deps/usr \
+    --with-pgconfig="$dist/bin/pg_config" \
+    --with-pgsql-libdir="$dist/lib" \
+    --with-geosconfig="$deps/usr/bin/geos-config" \
+    --with-projdir="$deps/usr" \
+    --with-xmlconfig="$deps/usr/bin/xml2-config" \
+    --with-gdalconfig="$deps/usr/bin/gdal-config" \
+    --without-sfcgal \
+    LDFLAGS="-L$deps/usr/lib -L$dist/lib -Wl,-rpath,'\$ORIGIN/..' -Wl,--disable-new-dtags -ldl -lm -lstdc++" \
+    CPPFLAGS="-I$dist/include -I$deps/usr/include" \
     --without-interrupt-tests
 ```
 
@@ -605,10 +610,7 @@ WHERE ST_DWithin(
 
 原因：libtool 记录了绝对路径，移动库文件后路径失效
 
-解决：使用 `-static-libtool-libs` 参数强制静态链接
-```bash
-LDFLAGS="-L$deps/usr/lib -static-libtool-libs"
-```
+解决：编译时使用动态库模式，libtool 会正确处理依赖关系
 
 **2. C compiler cannot create executables**
 
@@ -669,7 +671,7 @@ ls $deps/usr/bin/protoc
 | pg_cron | pkglibdir=$tmp_dest/lib/postgresql | datadir=$tmp_dest/share/postgresql |
 | pg_repack | pkglibdir=$tmp_dest/lib/postgresql | datadir=$tmp_dest/share/postgresql |
 | pgvector | pkglibdir=$tmp_dest/lib/postgresql | datadir=$tmp_dest/share/postgresql |
-| TimescaleDB | -DCMAKE_INSTALL_LIBDIR="lib/postgresql" | -DCMAKE_INSTALL_DATADIR="share/postgresql" |
+| TimescaleDB | PG_LIBDIR/PG_PKGLIBDIR 参数 | PG_SHAREDIR/PG_DATADIR 参数 |
 | PostGIS | 通过 configure 和 make install DESTDIR | 通过 configure 和 make install DESTDIR |
 
 ### 依赖处理对比
@@ -731,8 +733,10 @@ pkglibdir="$tmp_dest/lib/postgresql"
 datadir="$tmp_dest/share/postgresql"
 
 # TimescaleDB
--DCMAKE_INSTALL_LIBDIR="lib/postgresql"
--DCMAKE_INSTALL_DATADIR="share/postgresql"
+-PG_LIBDIR="/lib/postgresql"
+-PG_PKGLIBDIR="/lib/postgresql"
+-PG_SHAREDIR="/share/postgresql"
+-PG_DATADIR="/share/postgresql"
 ```
 
 ### 5. TimescaleDB 无效 CMake 参数
@@ -746,17 +750,13 @@ CMake Warning:
     USE_ZSTD
 ```
 
-**解决方案**：移除这些无效参数，TimescaleDB 通过 PG_CONFIG 自动检测
+**说明**：这些参数在 CMake 配置中保留，但 CMake 会忽略它们。TimescaleDB 通过 PG_CONFIG 自动检测 ICU/LZ4/ZSTD
 
 ### 6. pg_repack 客户端 RPATH 问题
 
 **问题描述**：pg_repack 命令找不到 libpq
 
-**解决方案**：编译时设置 RPATH
-
-```bash
-LDFLAGS="-L$pg_src/src/common -L$pg_src/src/port -L$dist/lib -Wl,-rpath=\$\$ORIGIN/../lib"
-```
+**解决方案**：打包时通过 fix_rpath 自动修复 RPATH
 
 ---
 
@@ -780,7 +780,7 @@ LDFLAGS="-L$pg_src/src/common -L$pg_src/src/port -L$dist/lib -Wl,-rpath=\$\$ORIG
 ```
 dist/host/16.15/
 ├── pgsql-16.15-linux-x86_64.tar.xz           # PostgreSQL 独立包
-├── pgsql-16.15-linux-x86_64-FULL.tar.xz      # FULL 包（含插件）
+├── pgsql-full-16.15-linux-x86_64.tar.xz      # FULL 包（含插件）
 └── plugins/
     ├── pg_cron-v1.6.7-pg16.x86_64.tar.gz
     ├── pg_repack-v1.5.3-pg16.x86_64.tar.gz

@@ -118,10 +118,11 @@ build/host/16.15/pg_cron_v1.6.7/    ← extract_source 自动解压
 
 ```bash
 # 脚本内部执行 (resolve_pg_env → run_or_die)
+# PG_CPPFLAGS 条件包含 DEPS_DIR (如果存在)
 make USE_PGXS=1 \
     PG_CONFIG="$PG_CONFIG_BIN" \
     PGXS="$PGXS_FILE" \
-    PG_CPPFLAGS="-I$PG_INCLUDE -I$PG_SERVER_INCLUDE -Iinclude -I$DEPS_DIR/usr/include" \
+    PG_CPPFLAGS="-I$PG_INCLUDE -I$PG_SERVER_INCLUDE -Iinclude [-I$DEPS_DIR/usr/include]" \
     -j"$jobs"
 ```
 

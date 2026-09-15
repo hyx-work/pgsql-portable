@@ -96,8 +96,6 @@ pgsql-portable/
 |------|-----|------|
 | `-DCMAKE_BUILD_TYPE` | `Release` | 生产环境构建，启用优化 |
 | `-DCMAKE_INSTALL_PREFIX` | `/` | 安装前缀，避免 `/usr` 路径污染 |
-| `-DCMAKE_INSTALL_LIBDIR` | `lib/postgresql` | 库文件安装目录 |
-| `-DCMAKE_INSTALL_DATADIR` | `share/postgresql` | 数据文件安装目录 |
 | `-DCMAKE_PREFIX_PATH` | `$deps/usr` | 依赖库搜索路径 |
 
 ### PostgreSQL 路径参数
@@ -109,7 +107,6 @@ pgsql-portable/
 | `-DPG_PKGLIBDIR` | `/lib/postgresql` | 插件库目录 |
 | `-DPG_SHAREDIR` | `/share/postgresql` | 共享文件目录 |
 | `-DPG_DATADIR` | `/share/postgresql` | 数据文件目录 |
-| `-DPG_INCLUDEDIR` | `/include/postgresql` | 头文件目录 |
 
 ### 功能开关参数
 
@@ -120,12 +117,12 @@ pgsql-portable/
 | `-DREGRESS_CHECKS` | `OFF` | 跳过回归测试 |
 | `-DWARNINGS_AS_ERRORS` | `OFF` | 不将警告视为错误 |
 
-### 无效参数（已移除）
+### 无效参数（保留但忽略）
 
-以下参数在 TimescaleDB 2.29.2 中无效，会被 CMake 忽略：
+以下参数在脚本中保留，但 TimescaleDB 2.29.2 会忽略它们：
 
 ```bash
-# ❌ 已移除
+# 保留但无效 - CMake 会警告但不影响编译
 -DUSE_ICU=ON      # TimescaleDB 通过 PG_CONFIG 自动检测
 -DUSE_LZ4=OFF     # 已废弃
 -DUSE_ZSTD=OFF    # 已废弃
@@ -202,6 +199,9 @@ cmake -B build \
     -DPG_CONFIG="$PG_CONFIG_BIN" \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR/usr" \
     -DUSE_OPENSSL=ON \
+    -DUSE_ICU=ON \
+    -DUSE_LZ4=OFF \
+    -DUSE_ZSTD=OFF \
     -DSEND_TELEMETRY_DEFAULT=OFF \
     -DREGRESS_CHECKS=OFF \
     -DWARNINGS_AS_ERRORS=OFF \
@@ -360,7 +360,7 @@ CMake Warning:
     USE_ZSTD
 ```
 
-**解决方案**：移除这些无效参数，TimescaleDB 2.29.2 通过 `PG_CONFIG` 自动检测
+**说明**：这些参数在脚本中保留，CMake 会警告但不影响编译。TimescaleDB 2.29.2 通过 `PG_CONFIG` 自动检测
 
 ### 5. 找不到 pg_config
 
