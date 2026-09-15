@@ -8,7 +8,7 @@ Bash 脚本，用于构建和打包 Linux 平台的 PostgreSQL 便携版二进�
 - **真正便携**：使用 `$ORIGIN/../lib` rpath，编译结果可任意迁移部署
 - **多版本支持**：PostgreSQL 16、17、18 版本均可构建
 - **多架构支持**：x86_64、aarch64、s390x、armv7l，支持交叉编译
-- **插件生态**：内置 pg_cron、pg_repack、pgvector、TimescaleDB 等常用扩展
+- **插件生态**：内置 pg_cron、pg_repack、pgvector、TimescaleDB、PostGIS 等常用扩展
 - **FULL 包模式**：预装插件 + 初始化数据库，解压即用
 - **一键部署**：自动化安装、配置 systemd 服务、端口管理
 - **运维工具**：备份恢复、WAL 归档管理、定时任务
@@ -65,7 +65,8 @@ dist/
             ├── pg_cron-1.6.7-linux-x86_64.tar.gz
             ├── pg_repack-1.5.3-linux-x86_64.tar.gz
             ├── vector-0.8.6-linux-x86_64.tar.gz
-            └── timescaledb-2.29.2-linux-x86_64.tar.gz
+            ├── timescaledb-2.29.2-linux-x86_64.tar.gz
+            └── postgis-3.6.4-linux-x86_64.tar.gz
 ```
 
 ## 使用方法
@@ -112,6 +113,7 @@ dist/
 | **pg_repack** | 1.5.3 | 在线表重组/清理膨胀 | 否 |
 | **pgvector** | 0.8.6 | 向量相似度搜索（AI/ML） | 否 |
 | **TimescaleDB** | 2.29.2 | 时间序列数据库 | ✅ 是 |
+| **PostGIS** | 3.6.4 | 空间地理信息扩展 | 否 |
 
 ### 插件开发规范
 
@@ -272,6 +274,7 @@ CC="zig cc --target=aarch64-linux-gnu.2.18" ./full-build.sh aarch64-linux-gnu 16
 | [PG_REPACK_BUILD_GUIDE.md](docs/PG_REPACK_BUILD_GUIDE.md) | pg_repack 编译指南 |
 | [PGVECTOR_BUILD_GUIDE.md](docs/PGVECTOR_BUILD_GUIDE.md) | pgvector 编译指南 |
 | [TIMESCALEDB_BUILD_GUIDE.md](docs/TIMESCALEDB_BUILD_GUIDE.md) | TimescaleDB 编译指南 |
+| [POSTGIS_BUILD_GUIDE.md](docs/POSTGIS_BUILD_GUIDE.md) | PostGIS 编译指南 |
 
 ## 许可证
 
